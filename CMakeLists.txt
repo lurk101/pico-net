@@ -9,13 +9,13 @@ pico_sdk_init()
 
 project(example C CXX ASM)
 
-add_subdirectory(mylib)
+add_subdirectory(comm)
 
 add_executable(example example.c)
 
 pico_enable_stdio_uart(example 1)
 pico_enable_stdio_usb(example 0)
 
-target_link_libraries(example PUBLIC pico_stdio mylib)
+target_link_libraries(example PUBLIC pico_stdlib comm)
 
 pico_add_extra_outputs(example)

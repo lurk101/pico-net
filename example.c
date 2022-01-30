@@ -4,14 +4,17 @@
  * won't be written for another century.
  */
 
-#include "pico/stdio.h"
-#include "stdio.h"
+#include "comm.h"
 
-#include "mylib.h"
+#include <string.h>
+#include <stdio.h>
+#include "pico/stdlib.h"
 
+const char* test_msg = "Hello world";
 // application entry point
 int main(void) {
     stdio_init_all();
-    libfunc();
-    printf(" world\n");
+	comm_init();
+	comm_xmit(0, 0, test_msg, strlen(test_msg) + 1);
+    printf("done\n");
 }
