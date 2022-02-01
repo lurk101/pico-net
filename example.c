@@ -14,7 +14,7 @@ const char* test_msg = "Hello world";
 // application entry point
 int main(void) {
     stdio_init_all();
-	comm_init();
-	comm_xmit(0, 0, test_msg, strlen(test_msg) + 1);
+    comm_init(0);
+    comm_xmit(0, 0, test_msg, strlen(test_msg) + 1);
     printf("done\n");
 }
