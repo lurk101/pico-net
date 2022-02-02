@@ -6,8 +6,6 @@
 
 #include "comm.h"
 
-#include "hardware/uart.h"
-
 #include <string.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -21,5 +19,5 @@ int main(void) {
     printf("done\n");
     while (true)
         ;
-    printf(" %d", (uint32_t)uart_getc(uart1));
+    //    printf(" %d", (uint32_t)uart_getc(uart1));
 }

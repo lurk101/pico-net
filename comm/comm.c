@@ -10,79 +10,85 @@
 #include "pico/stdlib.h"
 
 typedef struct __attribute__((__packed__)) comm_hdr {
-    struct comm_hdr* next;
-    uint8_t length;
-    uint8_t from;
-    uint8_t to;
-    uint8_t data[0];
+    struct comm_hdr* next; // next q element
+    uint8_t length;        // data length (including source and destination)
+    uint8_t from;          // source node
+    uint8_t to;            // destination node
+    uint8_t data[0];       // message data
 } comm_hdr_t;
 
 typedef struct comm_q {
-    comm_hdr_t* head;
-    comm_hdr_t* tail;
+    comm_hdr_t* head; // first node
+    comm_hdr_t* tail; // last node
 } comm_q_t;
 
-static uint8_t host;
+static uint8_t host; // This host's node id
 
-static comm_q_t xmit_q;
-static int xmit_dma_chan;
-static comm_hdr_t* xmit_buf;
-static volatile bool xmit_dma_bsy;
+static comm_q_t xmit_q;            // pending transmissions
+static int xmit_dma_chan;          // TX DMA channel
+static comm_hdr_t* xmit_buf;       // current TX buffer
+static volatile bool xmit_dma_bsy; // TX busy state
 
-static comm_q_t recv_q;
-static int recv_dma_ctl_chan;
-static int recv_dma_dat_chan;
-static comm_hdr_t* recv_buf;
+static comm_q_t recv_q;       // received messages
+static int recv_dma_ctl_chan; // RX control chanels
+static int recv_dma_dat_chan; // RX data channel
+static comm_hdr_t* recv_buf;  // current receive buffer
 
 static void xmit_start_dma(void) {
-    if (xmit_dma_bsy)
+    if (xmit_dma_bsy) // Already busy?
         return;
-    if (xmit_buf) {
+    if (xmit_buf) { // Free transmitted buffer
         free(xmit_buf);
         xmit_buf = NULL;
     }
-    if (xmit_q.head == NULL)
+    if (xmit_q.head == NULL) // Any more?
         return;
     xmit_dma_bsy = true;
-    xmit_buf = xmit_q.head;
+    xmit_buf = xmit_q.head; // dequeue pending message
     xmit_q.head = xmit_q.head->next;
     if (xmit_q.head == NULL)
         xmit_q.tail = NULL;
+    // configure and start the TX DMA channel
     dma_channel_set_read_addr(xmit_dma_chan, &xmit_buf->length, false);
     dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 1, true);
 }
 
 static void recv_start_dma(void) {
+    // allocate a max size receive buffer
     recv_buf = malloc(comm_max_packet_length + sizeof(comm_hdr_t));
+    // the length will be written directly to the data DMA descriptor
     dma_channel_set_write_addr(recv_dma_dat_chan, &recv_buf->from, false);
-    dma_channel_start(recv_dma_ctl_chan);
+    dma_channel_start(recv_dma_ctl_chan); // start the ctl channel to get the length
 }
 
 static void xmit_dma_irq0_handler(void) {
+    // Handle receive
     if (dma_channel_get_irq0_status(recv_dma_dat_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, recv_dma_dat_chan);
+        // retrieve the message length
         recv_buf->length = dma_debug_hw->ch[recv_dma_dat_chan].tcr;
-        if (recv_buf->to == host) {
-            if (recv_q.head == NULL)
+        if (recv_buf->to == host) {  // for this node?
+            if (recv_q.head == NULL) // enqueue it on the receive q
                 recv_q.head = recv_q.tail = recv_buf;
             else {
                 recv_q.tail->next = recv_buf;
                 recv_q.tail = recv_buf;
             }
-        } else {
-            if (xmit_q.head == NULL)
+        } else {                     // otherwise pass it on
+            if (xmit_q.head == NULL) // enqueu for retransmit
                 xmit_q.head = xmit_q.tail = recv_buf;
             else {
                 xmit_q.tail->next = recv_buf;
                 xmit_q.tail = recv_buf;
             }
         }
-        recv_start_dma();
+        recv_start_dma(); // restart for next message
     }
+    // handle transmit
     if (dma_channel_get_irq0_status(xmit_dma_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, xmit_dma_chan);
         xmit_dma_bsy = false;
-        xmit_start_dma();
+        xmit_start_dma(); // restart TX if more left
     }
 }
 
