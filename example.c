@@ -6,6 +6,8 @@
 
 #include "comm.h"
 
+#include "hardware/uart.h"
+
 #include <string.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -15,6 +17,9 @@ const char* test_msg = "Hello world";
 int main(void) {
     stdio_init_all();
     comm_init(0);
-    comm_xmit(0, 0, test_msg, strlen(test_msg) + 1);
+    comm_xmit(0, test_msg, strlen(test_msg) + 1);
     printf("done\n");
+    while (true)
+        ;
+    printf(" %d", (uint32_t)uart_getc(uart1));
 }
