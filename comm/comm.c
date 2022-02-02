@@ -33,7 +33,6 @@ static comm_q_t recv_q;
 static int recv_dma_ctl_chan;
 static int recv_dma_dat_chan;
 static comm_hdr_t* recv_buf;
-static volatile uint8_t recv_length;
 
 static void xmit_start_dma(void) {
     if (xmit_dma_bsy)
@@ -50,21 +49,16 @@ static void xmit_start_dma(void) {
     if (xmit_q.head == NULL)
         xmit_q.tail = NULL;
     dma_channel_set_read_addr(xmit_dma_chan, &xmit_buf->length, false);
-    dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 5, true);
+    dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 1, true);
 }
 
 static void recv_start_dma(void) {
     recv_buf = malloc(comm_max_packet_length + sizeof(comm_hdr_t));
-    memset(recv_buf, 0, comm_max_packet_length + sizeof(comm_hdr_t));
     dma_channel_set_write_addr(recv_dma_dat_chan, &recv_buf->from, false);
     dma_channel_start(recv_dma_ctl_chan);
 }
 
 static void xmit_dma_irq0_handler(void) {
-    if (dma_channel_get_irq0_status(recv_dma_ctl_chan)) {
-        dma_irqn_acknowledge_channel(DMA_IRQ_0, recv_dma_ctl_chan);
-        dma_channel_set_trans_count(recv_dma_dat_chan, recv_length, true);
-    }
     if (dma_channel_get_irq0_status(recv_dma_dat_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, recv_dma_dat_chan);
         recv_buf->length = dma_debug_hw->ch[recv_dma_dat_chan].tcr;
@@ -117,16 +111,17 @@ void comm_init(uint8_t host_addr) {
     // recv
     recv_q.head = recv_q.tail = NULL;
     recv_dma_ctl_chan = dma_claim_unused_channel(true);
+    recv_dma_dat_chan = dma_claim_unused_channel(true);
 
     c = dma_channel_get_default_config(recv_dma_ctl_chan);
-    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
     channel_config_set_dreq(&c, uart_get_dreq(uart1, false));
-    dma_channel_configure(recv_dma_ctl_chan, &c, &recv_length, &uart_get_hw(uart1)->dr, 1, false);
-    dma_channel_set_irq0_enabled(recv_dma_ctl_chan, true);
+    dma_channel_configure(recv_dma_ctl_chan, &c,
+                          &dma_hw->ch[recv_dma_dat_chan].al1_transfer_count_trig,
+                          &uart_get_hw(uart1)->dr, 1, false);
 
-    recv_dma_dat_chan = dma_claim_unused_channel(true);
     c = dma_channel_get_default_config(recv_dma_dat_chan);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_read_increment(&c, false);
