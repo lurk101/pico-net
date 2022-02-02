@@ -5,9 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-pico_sdk_init()
-
 project(example C CXX ASM)
+
+pico_sdk_init()
 
 add_subdirectory(comm)
 
