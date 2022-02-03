@@ -1,3 +1,4 @@
+
 .program uart_tx
 .side_set 1 opt
 
@@ -25,16 +26,19 @@ bitloop:                ; Loop 32 times
 
 
 % c-sdk {
+
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 
-static inline void uart_tx_program_init(PIO pio, uint sm, uint offset, uint pin_tx, uint div) {
+static inline void uart_program_init(PIO rx_pio, PIO tx_pio, uint sm, uint pin_rx, uint pin_tx,
+                                     uint clk_div) {
     // Tell PIO to initially drive output-high on the selected pin, then map PIO
     // onto that pin with the IO muxes.
-    pio_sm_set_pins_with_mask(pio, sm, 1u << pin_tx, 1u << pin_tx);
-    pio_sm_set_pindirs_with_mask(pio, sm, 1u << pin_tx, 1u << pin_tx);
-    pio_gpio_init(pio, pin_tx);
+    pio_sm_set_pins_with_mask(tx_pio, sm, 1u << pin_tx, 1u << pin_tx);
+    pio_sm_set_pindirs_with_mask(tx_pio, sm, 1u << pin_tx, 1u << pin_tx);
+    pio_gpio_init(tx_pio, pin_tx);
 
+    uint offset = pio_add_program(tx_pio, &uart_tx_program);
     pio_sm_config c = uart_tx_program_get_default_config(offset);
 
     // OUT shifts to right, no autopull
@@ -46,27 +50,24 @@ static inline void uart_tx_program_init(PIO pio, uint sm, uint offset, uint pin_
     sm_config_set_out_pins(&c, pin_tx, 1);
     sm_config_set_sideset_pins(&c, pin_tx);
 
-    // SM transmits 1 bit per 8 execution cycles.
-    sm_config_set_clkdiv(&c, div);
+    sm_config_set_clkdiv(&c, clk_div);
+    pio_sm_init(tx_pio, sm, offset, &c);
+    pio_sm_set_enabled(tx_pio, sm, true);
 
-    pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
-}
+    pio_sm_set_consecutive_pindirs(rx_pio, sm, pin_rx, 1, false);
+    pio_gpio_init(rx_pio, pin_rx);
+    gpio_pull_up(pin_rx);
 
-static inline void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin, uint div) {
-    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
-    pio_gpio_init(pio, pin);
-    gpio_pull_up(pin);
-
-    pio_sm_config c = uart_rx_program_get_default_config(offset);
-    sm_config_set_in_pins(&c, pin); // for WAIT, IN
+    offset = pio_add_program(rx_pio, &uart_rx_program);
+    c = uart_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_rx); // for WAIT, IN
     // Shift to right, autopush enabled
     sm_config_set_in_shift(&c, true, true, 32);
     // SM transmits 1 bit per 8 execution cycles.
-    sm_config_set_clkdiv(&c, div);
-    
-    pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
+    sm_config_set_clkdiv(&c, clk_div);
+
+    pio_sm_init(rx_pio, sm, offset, &c);
+    pio_sm_set_enabled(rx_pio, sm, true);
 }
 
 %}

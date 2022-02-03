@@ -18,10 +18,10 @@ int main(void) {
     int count = 0;
     for (int i = 0; i < N; i++) {
         sprintf(buf, test_msg, 1 << i);
-        comm_xmit(comm_host(), buf, strlen(buf) + 1);
+        comm_xmit(comm_host_id(), buf, strlen(buf) + 1);
         i++;
         sprintf(buf, test_msg, 1 << i);
-        comm_xmit(comm_host(), buf, strlen(buf) + 1);
+        comm_xmit(comm_host_id(), buf, strlen(buf) + 1);
         if (comm_recv(&from, buf) != -1) {
             count++;
             printf("%s from %d\n", buf, from);
@@ -33,6 +33,5 @@ int main(void) {
             count++;
             printf("%s from %d\n", buf, from);
         }
-    comm_deinit();
     printf("done\n");
 }
