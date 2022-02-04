@@ -5,6 +5,9 @@
 ;
 ; SPDX-License-Identifier: GPL-2.0-or-later
 ;
+
+.define CLKS 8 ; cycles per bit
+
 .program uart_tx
 
 .side_set 1 opt
@@ -12,11 +15,11 @@
 ; 32n1 UART transmit program.
 ; OUT pin 0 and side-set pin 0 are both mapped to UART TX pin.
 
-    pull       side 1 [7]  ; Assert stop bit, or stall with line in idle state
-    set x, 31  side 0 [7]  ; Preload bit counter, assert start bit for 8 clocks
-bitloop:                   ; This loop will run 32 times (32n1 UART)
-    out pins, 1            ; Shift 1 bit from OSR to the first OUT pin
-    jmp x-- bitloop   [6]  ; Each loop iteration is 8 cycles.
+    pull     side 1 [CLKS-1] ; Assert stop bit, or stall with line in idle state
+    set x,31 side 0 [CLKS-1] ; Preload bit counter, assert start bit for 8 clocks
+loop:                        ; This loop will run 32 times (32n1 UART)
+    out pins,1               ; Shift 1 bit from OSR to the first OUT pin
+    jmp x-- loop    [CLKS-2] ; Each loop iteration is 8 cycles.
 
 .program uart_rx
 
@@ -24,9 +27,13 @@ bitloop:                   ; This loop will run 32 times (32n1 UART)
 ; IN pin 0 is mapped to the GPIO used as UART RX.
 ; Autopush must be enabled, with a threshold of 32.
 
-    wait 0 pin 0        ; Wait for start bit
-    set x, 31 [10]      ; Preload bit counter, delay until eye of first data bit
-bitloop:                ; Loop 32 times
-    in pins, 1          ; Sample data
-    jmp x-- bitloop [6] ; Each iteration is 8 cycles
+    wait 0 pin 0             ; Wait for start bit
+    set x,31 [CLKS+CLKS/2-2] ; Preload bit counter, delay until eye of first data bit
+loop:                        ; Loop 32 times
+    in pins,1                ; Sample data
+    jmp x-- loop    [CLKS-2] ; Each iteration is 8 cycles
+
+% c-sdk {
+#define PIO_BIT_CLKS 8
+%}
 

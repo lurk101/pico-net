@@ -23,64 +23,58 @@
 
 #define PACKED __attribute__((__packed__))
 
-#define ID1_GPIO 2     // bit 1 of 2 bit node id
-#define ID0_GPIO 3     // bit 0 of node id
-#define TX_GPIO 4      // pio UART TX pin
-#define RX_GPIO 5      // pio UART RX pin
-#define LED_GPIO 25    // LED pin, also xmit busy flag
-#define SM 0           // using PIO state machine 0
-#define RX_PIO pio0    // RX PIO
-#define TX_PIO pio1    // RX PIO
+#define CMN_PIO pio0   // TX/RX PIO
 #define PIO_CLK_DIV 10 // 125 MHz / 10 = 12.5 MHz (8 clks / bit)
+#define ID1_GPIO 10    // bit 1 of 2 bit node id
+#define ID0_GPIO 11    // bit 0 of node id
+#define TX_GPIO 12     // pio UART TX pin
+#define RX_GPIO 13     // pio UART RX pin
+#define LED_GPIO 25    // LED pin, also tx busy flag
 
 // Message header
 typedef struct PACKED packet {
-    uint16_t data_length;  // length of packet data in bytes
-    uint8_t from;          // source node
-    uint8_t to;            // destination node
-    uint8_t data[0];       // message data
+    uint16_t length; // length of packet data in bytes
+    uint8_t from;    // source node
+    uint8_t to;      // destination node
+    uint8_t data[0]; // message data
 } packet_t;
 
 // Buffer
 typedef struct PACKED buffer {
-    struct buffer* next;   // next q entry
-    packet_t pkt;          // packet data
+    struct buffer* next; // next q entry
+    packet_t pkt;        // packet data
 } buffer_t;
 
 // Queue root
-typedef volatile struct queue {
+typedef struct queue {
     buffer_t* head; // first entry
     buffer_t* tail; // last entry
 } queue_t;
 
-static uint8_t id; // This node's id
-static spin_lock_t* lock;
+static spin_lock_t* lock; // queue mutual exclusion
+static uint8_t id;        // This node's id
+static int loopback = 1;  // loop back on/off
+static int rx_sm, tx_sm;  // rx/tx PIO state machines
 
-static queue_t free_q; // free buffer pool
+static queue_t free_q, tx_q, rx_q; // free buffer pool, tx & rx queues
 
-static queue_t xmit_q;     // pending transmissions
-static int xmit_dma_chan;  // TX DMA channel
-static buffer_t* xmit_buf; // current TX buffer
-
-static queue_t recv_q;        // received messages
-static int recv_dma_ctl_chan; // RX control channel
-static int recv_dma_dat_chan; // RX data channel
-static buffer_t* recv_buf;    // current receive buffer
-static semaphore_t recv_sem;  // receive synchronization
+static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
+static buffer_t* tx_buf;                // current TX buffer
+static buffer_t* rx_buf;                // current receive buffer
+static semaphore_t rx_sem;              // receive synchronization
 
 // push back
-static void enqueue(queue_t* q, buffer_t* buf) {
+static void enq(queue_t* q, buffer_t* buf) {
     buf->next = NULL;
-    if (q->head == NULL) // enqueue for retransmit
-        q->head = q->tail = buf;
-    else {
+    if (q->head == NULL) // enq for retransmit
+        q->head = buf;
+    else
         q->tail->next = buf;
-        q->tail = buf;
-    }
+    q->tail = buf;
 }
 
 // pop front
-static buffer_t* dequeue(queue_t* q) {
+static buffer_t* deq(queue_t* q) {
     if (q->head == NULL)
         return NULL;
     buffer_t* buf = q->head;
@@ -92,70 +86,68 @@ static buffer_t* dequeue(queue_t* q) {
 
 // Get buffer from free q. If empty then allocate a new one
 static buffer_t* get_buffer() {
-    buffer_t* buf = dequeue(&free_q);
+    buffer_t* buf = deq(&free_q);
     if (buf == NULL)
         buf = malloc(sizeof(buffer_t) + COMM_PKT_SIZE);
     return buf;
 }
 
 // Start transmit of 1st entry in tx q
-static void start_xmit(void) {
-    if (gpio_get(LED_GPIO)) // Already busy?
-        return;   // DMA interrupt will restart transmit
-    if (xmit_buf) // Free transmitted buffer
-        enqueue(&free_q, xmit_buf);
-    xmit_buf = dequeue(&xmit_q); // dequeue pending message
-    if (xmit_buf == NULL)
+static void start_tx(void) {
+    if (tx_buf)   // Free transmitted buffer
+        enq(&free_q, tx_buf);
+    tx_buf = deq(&tx_q); // deq pending message
+    if (tx_buf == NULL)
         return;
-    gpio_put(LED_GPIO, 1); // xmit busy
+    gpio_put(LED_GPIO, 1); // tx busy
     // configure and start the TX DMA channel
     // temporarilly use next pointer as word count
-    uint words = ((xmit_buf->pkt.data_length + sizeof(packet_t) + 3) / 4) * 4;
-    xmit_buf->next = (buffer_t*)words;
-    dma_channel_set_trans_count(xmit_dma_chan, words + 1, false);
-    dma_channel_set_read_addr(xmit_dma_chan, xmit_buf, true);
+    uint words = ((tx_buf->pkt.length + sizeof(packet_t) + 3) / 4) * 4;
+    tx_buf->next = (buffer_t*)words;
+    dma_channel_set_trans_count(tx_ch, words + 1, false);
+    dma_channel_set_read_addr(tx_ch, tx_buf, true);
 }
 
 // Start the 1 tx dma to retrieve the buffer length into the 2 tx dma descriptor
-static void start_recv(void) {
+static void start_rx(void) {
     // allocate a max size receive buffer
-    recv_buf = get_buffer();
-    if (recv_buf == NULL)
+    rx_buf = get_buffer();
+    if (rx_buf == NULL)
         panic("Out of comm buffers");
     // the length will be written directly to the data DMA descriptor
-    dma_channel_set_write_addr(recv_dma_dat_chan, &recv_buf->pkt, false);
-    dma_channel_start(recv_dma_ctl_chan);
+    dma_channel_set_write_addr(rx_dat_ch, &rx_buf->pkt, false);
+    dma_channel_start(rx_ctl_ch);
 }
 
 // Handle TX or RX dma done interrupt
 static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
-    if (dma_channel_get_irq0_status(recv_dma_dat_chan)) {
-        dma_irqn_acknowledge_channel(DMA_IRQ_0, recv_dma_dat_chan);
+    if (dma_channel_get_irq0_status(rx_dat_ch)) {
+        dma_irqn_acknowledge_channel(DMA_IRQ_0, rx_dat_ch);
         // forward the message
-        uint status = spin_lock_blocking(lock);
-        if (recv_buf->pkt.to == id) {
-            enqueue(&recv_q, recv_buf);
-            sem_release(&recv_sem);
+        uint msk = spin_lock_blocking(lock);
+        if (rx_buf->pkt.to == id) {
+            enq(&rx_q, rx_buf);
+            sem_release(&rx_sem);
         } else
-            enqueue(&xmit_q, recv_buf);
-        start_recv(); // restart for next message
-        spin_unlock(lock, status);
+            enq(&tx_q, rx_buf);
+        start_rx(); // restart for next message
+        spin_unlock(lock, msk);
     }
     // handle transmit
-    if (dma_channel_get_irq0_status(xmit_dma_chan)) {
-        dma_irqn_acknowledge_channel(DMA_IRQ_0, xmit_dma_chan);
+    if (dma_channel_get_irq0_status(tx_ch)) {
+        dma_irqn_acknowledge_channel(DMA_IRQ_0, tx_ch);
         gpio_put(LED_GPIO, 0);
-        uint status = spin_lock_blocking(lock);
-        start_xmit(); // restart TX if more left
-        spin_unlock(lock, status);
+        uint msk = spin_lock_blocking(lock);
+        start_tx(); // restart TX if more left
+        spin_unlock(lock, msk);
     }
 }
 
-static void common_recv_dma_config(dma_channel_config* c) {
+static void common_rx_dma_config(dma_channel_config* c) {
     channel_config_set_transfer_data_size(c, DMA_SIZE_32);
     channel_config_set_read_increment(c, false);
-    channel_config_set_dreq(c, pio_get_dreq(RX_PIO, SM, false));
+    channel_config_set_dreq(c, pio_get_dreq(CMN_PIO, rx_sm, false));
 }
 
 static void init_core1(void) {
@@ -173,10 +165,11 @@ static void init_core1(void) {
     // 32 bit PIO UART
     // Tell PIO to initially drive output-high on the selected pin, then map PIO
     // onto that pin with the IO muxes.
-    pio_sm_set_pins_with_mask(TX_PIO, SM, 1u << TX_GPIO, 1u << TX_GPIO);
-    pio_sm_set_pindirs_with_mask(TX_PIO, SM, 1u << TX_GPIO, 1u << TX_GPIO);
-    pio_gpio_init(TX_PIO, TX_GPIO);
-    uint offset = pio_add_program(TX_PIO, &uart_tx_program);
+    tx_sm = pio_claim_unused_sm(CMN_PIO, true);
+    pio_sm_set_pins_with_mask(CMN_PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
+    pio_sm_set_pindirs_with_mask(CMN_PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
+    pio_gpio_init(CMN_PIO, TX_GPIO);
+    uint offset = pio_add_program(CMN_PIO, &uart_tx_program);
     pio_sm_config p = uart_tx_program_get_default_config(offset);
     // OUT shifts to right, no autopull
     sm_config_set_out_shift(&p, true, false, 32);
@@ -186,59 +179,60 @@ static void init_core1(void) {
     sm_config_set_out_pins(&p, TX_GPIO, 1);
     sm_config_set_sideset_pins(&p, TX_GPIO);
     sm_config_set_clkdiv(&p, PIO_CLK_DIV);
-    pio_sm_init(TX_PIO, SM, offset, &p);
-    pio_sm_set_enabled(TX_PIO, SM, true);
+    pio_sm_init(CMN_PIO, tx_sm, offset, &p);
+    pio_sm_set_enabled(CMN_PIO, tx_sm, true);
     busy_wait_us_32(250000);
-    pio_sm_set_consecutive_pindirs(RX_PIO, SM, RX_GPIO, 1, false);
-    pio_gpio_init(RX_PIO, RX_GPIO);
+
+    rx_sm = pio_claim_unused_sm(CMN_PIO, true);
+    pio_sm_set_consecutive_pindirs(CMN_PIO, rx_sm, RX_GPIO, 1, false);
+    pio_gpio_init(CMN_PIO, RX_GPIO);
     gpio_pull_up(RX_GPIO);
-    offset = pio_add_program(RX_PIO, &uart_rx_program);
+    offset = pio_add_program(CMN_PIO, &uart_rx_program);
     p = uart_rx_program_get_default_config(offset);
     sm_config_set_in_pins(&p, RX_GPIO); // for WAIT, IN
     // Shift to right, autopush enabled
     sm_config_set_in_shift(&p, true, true, 32);
     // SM transmits 1 bit per 8 execution cycles.
     sm_config_set_clkdiv(&p, PIO_CLK_DIV);
-    pio_sm_init(RX_PIO, SM, offset, &p);
-    pio_sm_set_enabled(RX_PIO, SM, true);
+    pio_sm_init(CMN_PIO, rx_sm, offset, &p);
+    pio_sm_set_enabled(CMN_PIO, rx_sm, true);
 
-    // xmit DMA
-    free_q.head = free_q.tail = xmit_q.head = xmit_q.tail = recv_q.head = recv_q.tail = NULL;
-    sem_init(&recv_sem, 0, SHRT_MAX);
-    xmit_buf = NULL;
-    xmit_dma_chan = dma_claim_unused_channel(true); // get dma channel for tx
-    dma_channel_config c = dma_channel_get_default_config(xmit_dma_chan);
+    // tx DMA
+    free_q.head = free_q.tail = tx_q.head = tx_q.tail = rx_q.head = rx_q.tail = NULL;
+    sem_init(&rx_sem, 0, SHRT_MAX);
+    tx_buf = NULL;
+    tx_ch = dma_claim_unused_channel(true); // get dma channel for tx
+    dma_channel_config c = dma_channel_get_default_config(tx_ch);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
     channel_config_set_write_increment(&c, false);
-    channel_config_set_dreq(&c, pio_get_dreq(TX_PIO, SM, true)); // UART TX dreq driven DMA
-    dma_channel_set_irq0_enabled(xmit_dma_chan, true);       // interrupt when done
+    channel_config_set_dreq(&c, pio_get_dreq(CMN_PIO, tx_sm, true)); // UART TX dreq driven DMA
+    dma_channel_set_irq0_enabled(tx_ch, true);                       // interrupt when done
     // write to UART TX data register, no increment
-    dma_channel_configure(xmit_dma_chan, &c, &TX_PIO->txf[SM], NULL, 1, false);
+    dma_channel_configure(tx_ch, &c, &CMN_PIO->txf[tx_sm], NULL, 1, false);
 
-    // recv DMA
-    recv_dma_ctl_chan = dma_claim_unused_channel(true);
-    recv_dma_dat_chan = dma_claim_unused_channel(true);
+    // rx DMA
+    rx_ctl_ch = dma_claim_unused_channel(true);
+    rx_dat_ch = dma_claim_unused_channel(true);
     // control channel
-    c = dma_channel_get_default_config(recv_dma_ctl_chan);
-    common_recv_dma_config(&c);
+    c = dma_channel_get_default_config(rx_ctl_ch);
+    common_rx_dma_config(&c);
     channel_config_set_write_increment(&c, false);
-    dma_channel_configure(recv_dma_ctl_chan, &c,
-                          &dma_hw->ch[recv_dma_dat_chan].al1_transfer_count_trig, &RX_PIO->rxf[SM],
-                          1, false);
+    dma_channel_configure(rx_ctl_ch, &c, &dma_hw->ch[rx_dat_ch].al1_transfer_count_trig,
+                          &CMN_PIO->rxf[rx_sm], 1, false);
     // data channel
-    c = dma_channel_get_default_config(recv_dma_dat_chan);
-    common_recv_dma_config(&c);
+    c = dma_channel_get_default_config(rx_dat_ch);
+    common_rx_dma_config(&c);
     channel_config_set_write_increment(&c, true);
-    dma_channel_configure(recv_dma_dat_chan, &c, 0, &RX_PIO->rxf[SM], 0, false);
-    dma_channel_set_irq0_enabled(recv_dma_dat_chan, true);
+    dma_channel_configure(rx_dat_ch, &c, 0, &CMN_PIO->rxf[rx_sm], 0, false);
+    dma_channel_set_irq0_enabled(rx_dat_ch, true);
 
     irq_set_exclusive_handler(DMA_IRQ_0, dma_irq0_handler);
     irq_set_enabled(DMA_IRQ_0, true);
 
     lock = spin_lock_init(spin_lock_claim_unused(true));
-    uint status = spin_lock_blocking(lock);
-    start_recv();
-    spin_unlock(lock, status);
+    uint msk = spin_lock_blocking(lock);
+    start_rx();
+    spin_unlock(lock, msk);
     multicore_fifo_push_blocking(0); // tell core 0 we're ready
     for (;;)                         // handle interrupts
         __wfi();
@@ -251,53 +245,50 @@ void comm_init(void) {
 }
 
 // transmit a packet
-int comm_xmit(int to, const void* buffer, int length) {
+int comm_transmit(int to, const void* buffer, int length) {
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
-    uint status = spin_lock_blocking(lock);
+    uint msk = spin_lock_blocking(lock);
     buffer_t* buf = get_buffer();
-    spin_unlock(lock, status);
+    spin_unlock(lock, msk);
     if (buf == NULL)
         return -1;
-    buf->pkt.data_length = length;
+    buf->pkt.length = length;
     buf->pkt.from = id;
     buf->pkt.to = to;
     if (buffer && length)
         memcpy(buf->pkt.data, buffer, length);
-    status = spin_lock_blocking(lock);
-#if COMM_FORCE_PIO
-    enqueue(&xmit_q, buf);
-#else
-    if (buf->pkt.to == id) {
-        enqueue(&recv_q, buf);
-        sem_release(&recv_sem);
+    msk = spin_lock_blocking(lock);
+    if (loopback && (buf->pkt.to == id)) {
+        enq(&rx_q, buf);
+        sem_release(&rx_sem);
     } else
-        enqueue(&xmit_q, buf);
-#endif
-    start_xmit();
-    spin_unlock(lock, status);
+        enq(&tx_q, buf);
+    if (!gpio_get(LED_GPIO)) // Already busy?
+        start_tx();
+    spin_unlock(lock, msk);
     return length;
 }
 
 // Receive ready ?
-int comm_recv_ready(void) { return recv_q.head != NULL; }
+int comm_receive_ready(void) { return rx_q.head != NULL; }
 
 // Receive a packet
-int comm_recv_blocking(int* from, void* buffer, int buf_length) {
-    sem_acquire_blocking(&recv_sem);
-    uint status = spin_lock_blocking(lock);
-    buffer_t* buf = dequeue(&recv_q);
-    spin_unlock(lock, status);
+int comm_receive_blocking(int* from, void* buffer, int buf_length) {
+    sem_acquire_blocking(&rx_sem);
+    uint msk = spin_lock_blocking(lock);
+    buffer_t* buf = deq(&rx_q);
+    spin_unlock(lock, msk);
     if (from)
         *from = buf->pkt.from;
-    uint8_t l = buf->pkt.data_length;
+    uint8_t l = buf->pkt.length;
     if (l > buf_length)
         l = buf_length;
     if (buffer && l)
         memcpy(buffer, buf->pkt.data, l);
-    status = spin_lock_blocking(lock);
-    enqueue(&free_q, buf);
-    spin_unlock(lock, status);
+    msk = spin_lock_blocking(lock);
+    enq(&free_q, buf);
+    spin_unlock(lock, msk);
     return l;
 }
 
@@ -305,4 +296,7 @@ int comm_recv_blocking(int* from, void* buffer, int buf_length) {
 int comm_id(void) { return id; }
 
 // return effective communication baud rate (8 PIO clocks per bit)
-int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * 8); }
+int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * PIO_BIT_CLKS); }
+
+// Set loop back on transmit to self
+void comm_loop(int enable) { loopback = enable; }

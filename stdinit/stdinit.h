@@ -11,10 +11,17 @@
 extern "C" {
 #endif
 
+// Initialize and clear stdio device appropriately for either
+// UART, USB or both console.
+
 #define STDIO_IS_UART 1
 #define STDIO_IS_USB 2
 #define STDIO_IS_BOTH 3
 
+// Initialize stdio
+// Parameters: none
+// Returns: console type
+//
 int stdio_init(void);
 
 #ifdef __cplusplus

@@ -7,7 +7,7 @@
  */
 
 #include "comm.h"
-#include "stdio_init.h"
+#include "stdinit.h"
 
 #include "pico/stdlib.h"
 #include <stdio.h>
@@ -45,27 +45,28 @@ int main(void) {
     stdio_init();
     printf("starting\n");
     comm_init();
+    comm_loop(false);
     printf("baud rate %s\n", sputdec(comm_baud()));
     int from;
     char buf[32];
     int count = 0;
-    for (int i = 0; i < N; i++) {
+    for (int i = N - 1; i > 0; i--) {
         strcpy(buf, test_msg);
-        strcat(buf, sputdec(1 << i));
-        comm_xmit(comm_id(), buf, strlen(buf) + 1);
-        i++;
+        strcat(buf, sputdec((uint)-1 >> i));
+        comm_transmit(comm_id(), buf, strlen(buf) + 1);
+        i--;
         strcpy(buf, test_msg);
-        strcat(buf, sputdec(1 << i));
-        comm_xmit(comm_id(), buf, strlen(buf) + 1);
-        if (comm_recv_ready()) {
-            comm_recv_blocking(&from, buf, sizeof(buf));
+        strcat(buf, sputdec((uint)-1 >> i));
+        comm_transmit(comm_id(), buf, strlen(buf) + 1);
+        if (comm_receive_ready()) {
+            comm_receive_blocking(&from, buf, sizeof(buf));
             count++;
             printf("%s from %u\n", buf, from);
         }
     }
     printf("tx done\n");
     while (count < N) {
-        comm_recv_blocking(&from, buf, sizeof(buf));
+        comm_receive_blocking(&from, buf, sizeof(buf));
         count++;
         printf("%s from %u\n", buf, from);
     }
