@@ -6,9 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define N 20
+#define N 32
 
-const char* test_msg = "Hello world %d";
+const char* test_msg = "Hello world %u";
 // application entry point
 int main(void) {
     stdio_init();
@@ -26,14 +26,14 @@ int main(void) {
         if (comm_recv_ready()) {
             comm_recv_blocking(&from, buf);
             count++;
-            printf("%s from %d\n", buf, from);
+            printf("%s from %u\n", buf, from);
         }
     }
     printf("tx done\n");
     while (count < N) {
         comm_recv_blocking(&from, buf);
         count++;
-        printf("%s from %d\n", buf, from);
+        printf("%s from %u\n", buf, from);
     }
     printf("done\n");
 }

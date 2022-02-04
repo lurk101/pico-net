@@ -19,6 +19,7 @@
 #define ID0_GPIO 3     // bit 0 of node id
 #define TX_GPIO 4      // TX pin
 #define RX_GPIO 5      // RX pin
+#define LED_GPIO 25    // LED pin
 #define SM 0           // PIO state machine 0
 #define RX_PIO pio0    // RX PIO
 #define TX_PIO pio1    // RX PIO
@@ -53,7 +54,6 @@ static queue_t free_q; // free buffer pool
 static queue_t xmit_q;         // pending transmissions
 static int xmit_dma_chan;      // TX DMA channel
 static buffer_t* xmit_buf;     // current TX buffer
-static volatile bool xmit_bsy; // TX busy state
 
 static queue_t recv_q;        // received messages
 static int recv_dma_ctl_chan; // RX control channel
@@ -96,14 +96,14 @@ static int words(int bytes) { return (bytes + 3) / 4; }
 
 // Start transmit of 1st entry in tx q
 static void start_xmit(void) {
-    if (xmit_bsy) // Already busy?
+    if (gpio_get(LED_GPIO)) // Already busy?
         return;   // DMA interrupt will restart transmit
     if (xmit_buf) // Free transmitted buffer
         enqueue(&free_q, xmit_buf);
     xmit_buf = dequeue(&xmit_q); // dequeue pending message
     if (xmit_buf == NULL)
         return;
-    xmit_bsy = true;
+    gpio_put(LED_GPIO, 1);
     // configure and start the TX DMA channel
     xmit_buf->length = words(xmit_buf->pkt.data_length + sizeof(packet_t));
     dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 1, false);
@@ -139,7 +139,7 @@ static void dma_irq0_handler(void) {
     // handle transmit
     if (dma_channel_get_irq0_status(xmit_dma_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, xmit_dma_chan);
-        xmit_bsy = false;
+        gpio_put(LED_GPIO, 0);
         uint status = spin_lock_blocking(lock);
         start_xmit(); // restart TX if more left
         spin_unlock(lock, status);
@@ -156,8 +156,11 @@ static void default_recv_dma_config(dma_channel_config* c, bool write_incr) {
 static void init_core1(void) {
     gpio_pull_up(ID0_GPIO);
     gpio_pull_up(ID1_GPIO);
-    gpio_set_dir(ID0_GPIO, false);
-    gpio_set_dir(ID1_GPIO, false);
+    gpio_set_dir(ID0_GPIO, GPIO_IN);
+    gpio_set_dir(ID1_GPIO, GPIO_IN);
+    gpio_init(LED_GPIO);
+    gpio_set_dir(LED_GPIO, GPIO_OUT);
+    gpio_put(LED_GPIO, 0);
     busy_wait_us_32(10);
     id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
     // uart
@@ -166,7 +169,6 @@ static void init_core1(void) {
     free_q.head = free_q.tail = xmit_q.head = xmit_q.tail = recv_q.head = recv_q.tail = NULL;
     sem_init(&recv_sem, 0, SHRT_MAX);
     xmit_buf = NULL;
-    xmit_bsy = false;
     xmit_dma_chan = dma_claim_unused_channel(true); // get dma channel for tx
     dma_channel_config c = dma_channel_get_default_config(xmit_dma_chan);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
