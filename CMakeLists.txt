@@ -7,24 +7,24 @@ option(FORCE_PIO "" OFF)
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-project(example C CXX ASM)
+project(test C CXX ASM)
 
 pico_sdk_init()
 
 add_subdirectory(comm)
 add_subdirectory(stdio_init)
 
-add_executable(example example.c)
+add_executable(test test.c)
 
 if (FORCE_PIO)
-	target_compile_options(example PRIVATE -DCOMM_FORCE_PIO=1)
+	target_compile_options(test PRIVATE -DCOMM_FORCE_PIO=1)
 endif()
 
 
-pico_enable_stdio_uart(example 1)
-pico_enable_stdio_usb(example 0)
+pico_enable_stdio_uart(test 1)
+pico_enable_stdio_usb(test 0)
 
-target_link_libraries(example PUBLIC pico_stdlib comm stdio_init)
+target_link_libraries(test PUBLIC pico_stdlib comm stdio_init)
 
-pico_add_extra_outputs(example)
+pico_add_extra_outputs(test)
 

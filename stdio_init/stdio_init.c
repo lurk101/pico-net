@@ -23,6 +23,8 @@ int stdio_init(void) {
         sleep_ms(1000);
     r |= STDIO_IS_USB;
 #endif
-    puts_raw("\033[H\033[J");
+    static const char* clear = "\033[H\033[J";
+    for (const char* cp = clear; *cp; cp++)
+        putchar_raw(*cp);
     return r;
 }

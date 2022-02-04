@@ -2,9 +2,9 @@
 #include "comm.h"
 #include "stdio_init.h"
 
-#include <string.h>
-#include <stdio.h>
 #include "pico/stdlib.h"
+#include <stdio.h>
+#include <string.h>
 
 #define N 20
 
@@ -12,6 +12,7 @@ const char* test_msg = "Hello world %d";
 // application entry point
 int main(void) {
     stdio_init();
+    printf("starting\n");
     comm_init();
     uint8_t from;
     char buf[32];
