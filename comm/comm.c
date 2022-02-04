@@ -1,4 +1,5 @@
 
+#include <limits.h>
 #include <memory.h>
 #include <stdlib.h>
 
@@ -7,10 +8,21 @@
 
 #include "hardware/dma.h"
 #include "hardware/irq.h"
+
 #include "pico/multicore.h"
+#include "pico/platform.h"
 #include "pico/sync.h"
 
 #define PACKED __attribute__((__packed__))
+
+#define ID1_GPIO 2     // bit 1 of node id
+#define ID0_GPIO 3     // bit 0 of node id
+#define TX_GPIO 4      // TX pin
+#define RX_GPIO 5      // RX pin
+#define SM 0           // PIO state machine 0
+#define RX_PIO pio0    // RX PIO
+#define TX_PIO pio1    // RX PIO
+#define PIO_CLK_DIV 10 // 125 MHz / 10 = 12.5 MHz (8 clks / bit)
 
 // Message header
 typedef struct PACKED packet {
@@ -22,31 +34,34 @@ typedef struct PACKED packet {
 
 // Buffer
 typedef struct PACKED buffer {
-    struct buffer* next;   // next q element
+    struct buffer* next;   // next q entry
     uint32_t length;       // length of receive in 32 bit words
     packet_t pkt;          // packet data
 } buffer_t;
 
+// Queue root
 typedef volatile struct queue {
-    buffer_t* head; // first node
-    buffer_t* tail; // last node
+    buffer_t* head; // first entry
+    buffer_t* tail; // last entry
 } queue_t;
 
-static uint8_t host_id; // This host's node id
+static uint8_t id; // This node's id
+static spin_lock_t* lock;
 
-static critical_section_t critical;
-static queue_t free_q;
+static queue_t free_q; // free buffer pool
 
-static queue_t xmit_q;             // pending transmissions
-static int xmit_dma_chan;          // TX DMA channel
-static buffer_t* xmit_buf;         // current TX buffer
-static volatile bool xmit_dma_bsy; // TX busy state
+static queue_t xmit_q;         // pending transmissions
+static int xmit_dma_chan;      // TX DMA channel
+static buffer_t* xmit_buf;     // current TX buffer
+static volatile bool xmit_bsy; // TX busy state
 
 static queue_t recv_q;        // received messages
 static int recv_dma_ctl_chan; // RX control channel
 static int recv_dma_dat_chan; // RX data channel
 static buffer_t* recv_buf;    // current receive buffer
+static semaphore_t recv_sem;  // receive synchronization
 
+// push back
 static void enqueue(queue_t* q, buffer_t* buf) {
     buf->next = NULL;
     if (q->head == NULL) // enqueue for retransmit
@@ -57,6 +72,7 @@ static void enqueue(queue_t* q, buffer_t* buf) {
     }
 }
 
+// pop front
 static buffer_t* dequeue(queue_t* q) {
     if (q->head == NULL)
         return NULL;
@@ -67,6 +83,7 @@ static buffer_t* dequeue(queue_t* q) {
     return buf;
 }
 
+// Get buffer from free q. If empty the allocate a new one
 static buffer_t* get_buffer() {
     buffer_t* buf = dequeue(&free_q);
     if (buf == NULL)
@@ -74,64 +91,60 @@ static buffer_t* get_buffer() {
     return buf;
 }
 
+// Round bytes up to full number of 32 bit words
 static int words(int bytes) { return (bytes + 3) / 4; }
 
+// Start transmit of 1st entry in tx q
 static void start_xmit(void) {
-    if (xmit_dma_bsy) // Already busy?
-        return;
-    if (xmit_buf) { // Free transmitted buffer
+    if (xmit_bsy) // Already busy?
+        return;   // DMA interrupt will restart transmit
+    if (xmit_buf) // Free transmitted buffer
         enqueue(&free_q, xmit_buf);
-        xmit_buf = NULL;
-    }
     xmit_buf = dequeue(&xmit_q); // dequeue pending message
     if (xmit_buf == NULL)
         return;
-    xmit_dma_bsy = true;
+    xmit_bsy = true;
     // configure and start the TX DMA channel
     xmit_buf->length = words(xmit_buf->pkt.data_length + sizeof(packet_t));
     dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 1, false);
     dma_channel_set_read_addr(xmit_dma_chan, &xmit_buf->length, true);
 }
 
+// Start the 1 tx dma to retrieve the buffer length into the 2 tx dma descriptor
 static void start_recv(void) {
     // allocate a max size receive buffer
     recv_buf = get_buffer();
     if (recv_buf == NULL)
-        abort();
+        panic("Out of comm buffers");
     // the length will be written directly to the data DMA descriptor
     dma_channel_set_write_addr(recv_dma_dat_chan, &recv_buf->pkt, false);
     dma_channel_start(recv_dma_ctl_chan);
 }
 
+// Handle TX or RX dma done interrupt
 static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
     if (dma_channel_get_irq0_status(recv_dma_dat_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, recv_dma_dat_chan);
         // forward the message
-        critical_section_enter_blocking(&critical);
-        enqueue(recv_buf->pkt.to == host_id ? &recv_q : &xmit_q, recv_buf);
+        uint status = spin_lock_blocking(lock);
+        if (recv_buf->pkt.to == id) {
+            enqueue(&recv_q, recv_buf);
+            sem_release(&recv_sem);
+        } else
+            enqueue(&xmit_q, recv_buf);
         start_recv(); // restart for next message
-        critical_section_exit(&critical);
+        spin_unlock(lock, status);
     }
     // handle transmit
     if (dma_channel_get_irq0_status(xmit_dma_chan)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, xmit_dma_chan);
-        xmit_dma_bsy = false;
-        critical_section_enter_blocking(&critical);
+        xmit_bsy = false;
+        uint status = spin_lock_blocking(lock);
         start_xmit(); // restart TX if more left
-        critical_section_exit(&critical);
+        spin_unlock(lock, status);
     }
 }
-
-#define ID1_GPIO 2
-#define ID0_GPIO 3
-#define TX_GPIO 4
-#define RX_GPIO 5
-#define SM 0
-#define RX_PIO pio0
-#define TX_PIO pio1
-// 125 MHz / 10 = 12.5 MHz
-#define PIO_CLK_DIV 10
 
 static void default_recv_dma_config(dma_channel_config* c, bool write_incr) {
     channel_config_set_transfer_data_size(c, DMA_SIZE_32);
@@ -141,19 +154,19 @@ static void default_recv_dma_config(dma_channel_config* c, bool write_incr) {
 }
 
 static void init_core1(void) {
-    critical_section_init(&critical);
     gpio_pull_up(ID0_GPIO);
     gpio_pull_up(ID1_GPIO);
     gpio_set_dir(ID0_GPIO, false);
     gpio_set_dir(ID1_GPIO, false);
     busy_wait_us_32(10);
-    host_id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
+    id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
     // uart
     uart_program_init(RX_PIO, TX_PIO, SM, RX_GPIO, TX_GPIO, PIO_CLK_DIV);
     // xmit
     free_q.head = free_q.tail = xmit_q.head = xmit_q.tail = recv_q.head = recv_q.tail = NULL;
+    sem_init(&recv_sem, 0, SHRT_MAX);
     xmit_buf = NULL;
-    xmit_dma_bsy = false;
+    xmit_bsy = false;
     xmit_dma_chan = dma_claim_unused_channel(true); // get dma channel for tx
     dma_channel_config c = dma_channel_get_default_config(xmit_dma_chan);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
@@ -181,9 +194,10 @@ static void init_core1(void) {
     irq_set_exclusive_handler(DMA_IRQ_0, dma_irq0_handler);
     irq_set_enabled(DMA_IRQ_0, true);
 
-    critical_section_enter_blocking(&critical);
+    lock = spin_lock_init(spin_lock_claim_unused(true));
+    uint status = spin_lock_blocking(lock);
     start_recv();
-    critical_section_exit(&critical);
+    spin_unlock(lock, status);
     multicore_fifo_push_blocking(0);
     for (;;)
         __wfi();
@@ -199,37 +213,42 @@ int comm_xmit(uint8_t to, const void* buffer, uint16_t length) {
         return -1;
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
-    critical_section_enter_blocking(&critical);
+    uint status = spin_lock_blocking(lock);
     buffer_t* buf = get_buffer();
     if (buf == NULL) {
-        critical_section_exit(&critical);
+        spin_unlock(lock, status);
         return -1;
     }
     buf->pkt.data_length = length;
-    buf->pkt.from = host_id;
+    buf->pkt.from = id;
     buf->pkt.to = to;
     memcpy(buf->pkt.data, buffer, length);
 #if COMM_FORCE_PIO
     enqueue(&xmit_q, buf);
 #else
-    enqueue(buf->pkt.to == host_id ? &recv_q : &xmit_q, buf);
+    if (buf->pkt.to == id) {
+        enqueue(&recv_q, buf);
+        sem_release(&recv_sem);
+    } else
+        enqueue(&xmit_q, buf);
 #endif
     start_xmit();
-    critical_section_exit(&critical);
+    spin_unlock(lock, status);
     return length;
 }
 
-int comm_recv(uint8_t* from, void* buffer) {
-    if (recv_q.head == NULL)
-        return -1;
-    critical_section_enter_blocking(&critical);
+int comm_recv_ready(void) { return recv_q.head != NULL; }
+
+int comm_recv_blocking(uint8_t* from, void* buffer) {
+    sem_acquire_blocking(&recv_sem);
+    uint status = spin_lock_blocking(lock);
     buffer_t* buf = dequeue(&recv_q);
     *from = buf->pkt.from;
     uint8_t l = buf->pkt.data_length;
     memcpy(buffer, buf->pkt.data, l);
     enqueue(&free_q, buf);
-    critical_section_exit(&critical);
+    spin_unlock(lock, status);
     return l;
 }
 
-uint8_t comm_host_id(void) { return host_id; }
+uint8_t comm_id(void) { return id; }

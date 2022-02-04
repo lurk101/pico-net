@@ -12,6 +12,7 @@ project(example C CXX ASM)
 pico_sdk_init()
 
 add_subdirectory(comm)
+add_subdirectory(stdio_init)
 
 add_executable(example example.c)
 
@@ -23,7 +24,7 @@ endif()
 pico_enable_stdio_uart(example 1)
 pico_enable_stdio_usb(example 0)
 
-target_link_libraries(example PUBLIC pico_stdlib comm)
+target_link_libraries(example PUBLIC pico_stdlib comm stdio_init)
 
 pico_add_extra_outputs(example)
 
