@@ -36,7 +36,6 @@ typedef struct PACKED packet {
 // Buffer
 typedef struct PACKED buffer {
     struct buffer* next;   // next q entry
-    uint32_t length;       // length of receive in 32 bit words
     packet_t pkt;          // packet data
 } buffer_t;
 
@@ -51,9 +50,9 @@ static spin_lock_t* lock;
 
 static queue_t free_q; // free buffer pool
 
-static queue_t xmit_q;         // pending transmissions
-static int xmit_dma_chan;      // TX DMA channel
-static buffer_t* xmit_buf;     // current TX buffer
+static queue_t xmit_q;     // pending transmissions
+static int xmit_dma_chan;  // TX DMA channel
+static buffer_t* xmit_buf; // current TX buffer
 
 static queue_t recv_q;        // received messages
 static int recv_dma_ctl_chan; // RX control channel
@@ -83,16 +82,13 @@ static buffer_t* dequeue(queue_t* q) {
     return buf;
 }
 
-// Get buffer from free q. If empty the allocate a new one
+// Get buffer from free q. If empty then allocate a new one
 static buffer_t* get_buffer() {
     buffer_t* buf = dequeue(&free_q);
     if (buf == NULL)
         buf = malloc(sizeof(buffer_t) + COMM_PKT_SIZE);
     return buf;
 }
-
-// Round bytes up to full number of 32 bit words
-static int words(int bytes) { return (bytes + 3) / 4; }
 
 // Start transmit of 1st entry in tx q
 static void start_xmit(void) {
@@ -105,9 +101,11 @@ static void start_xmit(void) {
         return;
     gpio_put(LED_GPIO, 1);
     // configure and start the TX DMA channel
-    xmit_buf->length = words(xmit_buf->pkt.data_length + sizeof(packet_t));
-    dma_channel_set_trans_count(xmit_dma_chan, xmit_buf->length + 1, false);
-    dma_channel_set_read_addr(xmit_dma_chan, &xmit_buf->length, true);
+    // temporarilly use next pointer as word count
+    uint words = ((xmit_buf->pkt.data_length + sizeof(packet_t) + 3) / 4) * 4;
+    xmit_buf->next = (buffer_t*)words;
+    dma_channel_set_trans_count(xmit_dma_chan, words + 1, false);
+    dma_channel_set_read_addr(xmit_dma_chan, xmit_buf, true);
 }
 
 // Start the 1 tx dma to retrieve the buffer length into the 2 tx dma descriptor
@@ -210,21 +208,20 @@ void comm_init(void) {
     multicore_fifo_pop_blocking();
 }
 
-int comm_xmit(uint8_t to, const void* buffer, uint16_t length) {
-    if (length < 1)
-        return -1;
+int comm_xmit(int to, const void* buffer, int length) {
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
     uint status = spin_lock_blocking(lock);
     buffer_t* buf = get_buffer();
-    if (buf == NULL) {
-        spin_unlock(lock, status);
+    spin_unlock(lock, status);
+    if (buf == NULL)
         return -1;
-    }
     buf->pkt.data_length = length;
     buf->pkt.from = id;
     buf->pkt.to = to;
-    memcpy(buf->pkt.data, buffer, length);
+    if (buffer && length)
+        memcpy(buf->pkt.data, buffer, length);
+    status = spin_lock_blocking(lock);
 #if COMM_FORCE_PIO
     enqueue(&xmit_q, buf);
 #else
@@ -241,16 +238,24 @@ int comm_xmit(uint8_t to, const void* buffer, uint16_t length) {
 
 int comm_recv_ready(void) { return recv_q.head != NULL; }
 
-int comm_recv_blocking(uint8_t* from, void* buffer) {
+int comm_recv_blocking(int* from, void* buffer, int buf_length) {
     sem_acquire_blocking(&recv_sem);
     uint status = spin_lock_blocking(lock);
     buffer_t* buf = dequeue(&recv_q);
-    *from = buf->pkt.from;
+    spin_unlock(lock, status);
+    if (from)
+        *from = buf->pkt.from;
     uint8_t l = buf->pkt.data_length;
-    memcpy(buffer, buf->pkt.data, l);
+    if (l > buf_length)
+        l = buf_length;
+    if (buffer && l)
+        memcpy(buffer, buf->pkt.data, l);
+    status = spin_lock_blocking(lock);
     enqueue(&free_q, buf);
     spin_unlock(lock, status);
     return l;
 }
 
-uint8_t comm_id(void) { return id; }
+int comm_id(void) { return id; }
+
+int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * 8); }
