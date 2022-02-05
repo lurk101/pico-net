@@ -29,44 +29,43 @@
 #define ID0_GPIO 11    // bit 0 of node id
 #define TX_GPIO 12     // pio UART TX pin
 #define RX_GPIO 13     // pio UART RX pin
-#define LED_GPIO 25    // LED pin, also tx busy flag
 
-// Message header
-typedef struct PACKED packet {
-    uint16_t length; // length of packet data in bytes
+// Packet header
+typedef struct PACKED {
+    uint8_t length;  // length of packet data in bytes
     uint8_t from;    // source node
     uint8_t to;      // destination node
     uint8_t data[0]; // message data
-} packet_t;
+} pkt_t;
 
 // Buffer
 typedef struct PACKED buffer {
     struct buffer* next; // next q entry
-    packet_t pkt;        // packet data
-} buffer_t;
+    pkt_t pkt;           // packet data
+} buf_t;
 
-// Queue root
-typedef struct queue {
-    buffer_t* head; // first entry
-    buffer_t* tail; // last entry
-} queue_t;
+// Queue
+typedef volatile struct {
+    buf_t* head; // first entry
+    buf_t* tail; // last entry
+} q_t;
 
 static spin_lock_t* lock; // queue mutual exclusion
-static uint8_t id;        // This node's id
+static int id;            // This node's id
 static int loopback = 1;  // loop back on/off
 static int rx_sm, tx_sm;  // rx/tx PIO state machines
 
-static queue_t free_q, tx_q, rx_q; // free buffer pool, tx & rx queues
+static q_t free_q, tx_q, rx_q; // free buffer pool, tx & rx queues
 
 static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
-static buffer_t* tx_buf;                // current TX buffer
-static buffer_t* rx_buf;                // current receive buffer
+static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
 static semaphore_t rx_sem;              // receive synchronization
+static volatile int tx_bsy;             // tx dma is busy
 
 // push back
-static void enq(queue_t* q, buffer_t* buf) {
+static inline void enq(q_t* q, buf_t* buf) {
     buf->next = NULL;
-    if (q->head == NULL) // enq for retransmit
+    if (q->head == NULL)
         q->head = buf;
     else
         q->tail->next = buf;
@@ -74,10 +73,10 @@ static void enq(queue_t* q, buffer_t* buf) {
 }
 
 // pop front
-static buffer_t* deq(queue_t* q) {
+static inline buf_t* deq(q_t* q) {
     if (q->head == NULL)
         return NULL;
-    buffer_t* buf = q->head;
+    buf_t* buf = q->head;
     q->head = q->head->next;
     if (q->head == NULL)
         q->tail = NULL;
@@ -85,10 +84,10 @@ static buffer_t* deq(queue_t* q) {
 }
 
 // Get buffer from free q. If empty then allocate a new one
-static buffer_t* get_buffer() {
-    buffer_t* buf = deq(&free_q);
+static inline buf_t* get_buffer() {
+    buf_t* buf = deq(&free_q);
     if (buf == NULL)
-        buf = malloc(sizeof(buffer_t) + COMM_PKT_SIZE);
+        buf = malloc(sizeof(buf_t) + COMM_PKT_SIZE);
     return buf;
 }
 
@@ -99,11 +98,11 @@ static void start_tx(void) {
     tx_buf = deq(&tx_q); // deq pending message
     if (tx_buf == NULL)
         return;
-    gpio_put(LED_GPIO, 1); // tx busy
+    tx_bsy = 1; // tx busy
     // configure and start the TX DMA channel
     // temporarilly use next pointer as word count
-    uint words = ((tx_buf->pkt.length + sizeof(packet_t) + 3) / 4) * 4;
-    tx_buf->next = (buffer_t*)words;
+    uint words = (tx_buf->pkt.length + sizeof(pkt_t) + 4) & ~3;
+    tx_buf->next = (buf_t*)words;
     dma_channel_set_trans_count(tx_ch, words + 1, false);
     dma_channel_set_read_addr(tx_ch, tx_buf, true);
 }
@@ -137,7 +136,7 @@ static void dma_irq0_handler(void) {
     // handle transmit
     if (dma_channel_get_irq0_status(tx_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, tx_ch);
-        gpio_put(LED_GPIO, 0);
+        tx_bsy = 0;
         uint msk = spin_lock_blocking(lock);
         start_tx(); // restart TX if more left
         spin_unlock(lock, msk);
@@ -156,9 +155,6 @@ static void init_core1(void) {
     gpio_pull_up(ID1_GPIO);
     gpio_set_dir(ID0_GPIO, GPIO_IN);
     gpio_set_dir(ID1_GPIO, GPIO_IN);
-    gpio_init(LED_GPIO);
-    gpio_set_dir(LED_GPIO, GPIO_OUT);
-    gpio_put(LED_GPIO, 0);
     busy_wait_us_32(10);
     id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
 
@@ -201,6 +197,7 @@ static void init_core1(void) {
     free_q.head = free_q.tail = tx_q.head = tx_q.tail = rx_q.head = rx_q.tail = NULL;
     sem_init(&rx_sem, 0, SHRT_MAX);
     tx_buf = NULL;
+    tx_bsy = 0;
     tx_ch = dma_claim_unused_channel(true); // get dma channel for tx
     dma_channel_config c = dma_channel_get_default_config(tx_ch);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
@@ -246,25 +243,26 @@ void comm_init(void) {
 
 // transmit a packet
 int comm_transmit(int to, const void* buffer, int length) {
+    if ((length < 1) || !buffer)
+        return -1;
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
     uint msk = spin_lock_blocking(lock);
-    buffer_t* buf = get_buffer();
+    buf_t* buf = get_buffer();
     spin_unlock(lock, msk);
     if (buf == NULL)
         return -1;
-    buf->pkt.length = length;
+    buf->pkt.length = length - 1;
     buf->pkt.from = id;
     buf->pkt.to = to;
-    if (buffer && length)
-        memcpy(buf->pkt.data, buffer, length);
+    memcpy(buf->pkt.data, buffer, length);
     msk = spin_lock_blocking(lock);
     if (loopback && (buf->pkt.to == id)) {
         enq(&rx_q, buf);
         sem_release(&rx_sem);
     } else
         enq(&tx_q, buf);
-    if (!gpio_get(LED_GPIO)) // Already busy?
+    if (!tx_bsy) // Already busy?
         start_tx();
     spin_unlock(lock, msk);
     return length;
@@ -275,17 +273,18 @@ int comm_receive_ready(void) { return rx_q.head != NULL; }
 
 // Receive a packet
 int comm_receive_blocking(int* from, void* buffer, int buf_length) {
+    if (!buffer || buf_length < 1)
+        return -1;
     sem_acquire_blocking(&rx_sem);
     uint msk = spin_lock_blocking(lock);
-    buffer_t* buf = deq(&rx_q);
+    buf_t* buf = deq(&rx_q);
     spin_unlock(lock, msk);
     if (from)
         *from = buf->pkt.from;
-    uint8_t l = buf->pkt.length;
+    uint8_t l = buf->pkt.length + 1;
     if (l > buf_length)
         l = buf_length;
-    if (buffer && l)
-        memcpy(buffer, buf->pkt.data, l);
+    memcpy(buffer, buf->pkt.data, l);
     msk = spin_lock_blocking(lock);
     enq(&free_q, buf);
     spin_unlock(lock, msk);
@@ -296,7 +295,7 @@ int comm_receive_blocking(int* from, void* buffer, int buf_length) {
 int comm_id(void) { return id; }
 
 // return effective communication baud rate (8 PIO clocks per bit)
-int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * PIO_BIT_CLKS); }
+int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * BIT_CLKS); }
 
 // Set loop back on transmit to self
 void comm_loop(int enable) { loopback = enable; }

@@ -60,7 +60,7 @@ int comm_transmit(int to, const void* buffer, int length);
 //    from - pointer to packet's source node id
 //    buffer - pointer to packet data
 //    length - length of packet buffer
-// Return: bytes sent, -1 for error.
+// Return: bytes received, -1 for error.
 //
 int comm_receive_blocking(int* from, void* buffer, int buf_size);
 
