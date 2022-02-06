@@ -45,25 +45,24 @@ typedef struct PACKED buffer {
 } buf_t;
 
 // Queue
-typedef volatile struct {
+typedef struct {
     buf_t* head; // first entry
     buf_t* tail; // last entry
 } q_t;
 
-static spin_lock_t* lock; // queue mutual exclusion
-static int id;            // This node's id
-static int loopback = 1;  // loop back on/off
-static int rx_sm, tx_sm;  // rx/tx PIO state machines
-
-static q_t free_q, tx_q, rx_q; // free buffer pool, tx & rx queues
-
-static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
-static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
+static spin_lock_t* lock;               // queue mutual exclusion
 static semaphore_t rx_sem;              // receive synchronization
-static volatile int tx_bsy;             // tx dma is busy
+static int id;                          // This node's id
+static int loopback = 1;                // loop back on/off
+static int rx_sm, tx_sm;                // rx/tx PIO state machines
+static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
+static int tx_bsy;                      // tx dma is busy
+static q_t free_q, tx_q, rx_q;          // free buffer pool, tx & rx queues
+static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
 
 // push back
 static inline void enq(q_t* q, buf_t* buf) {
+    assert(q && buf);
     buf->next = NULL;
     if (q->head == NULL)
         q->head = buf;
@@ -74,6 +73,7 @@ static inline void enq(q_t* q, buf_t* buf) {
 
 // pop front
 static inline buf_t* deq(q_t* q) {
+    assert(q);
     if (q->head == NULL)
         return NULL;
     buf_t* buf = q->head;
@@ -124,14 +124,13 @@ static void dma_irq0_handler(void) {
     if (dma_channel_get_irq0_status(rx_dat_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, rx_dat_ch);
         // forward the message
+        bool local = rx_buf->pkt.to == id;
         uint msk = spin_lock_blocking(lock);
-        if (rx_buf->pkt.to == id) {
-            enq(&rx_q, rx_buf);
-            sem_release(&rx_sem);
-        } else
-            enq(&tx_q, rx_buf);
+        enq(local ? &rx_q : &tx_q, rx_buf);
         start_rx(); // restart for next message
         spin_unlock(lock, msk);
+        if (local)
+            sem_release(&rx_sem);
     }
     // handle transmit
     if (dma_channel_get_irq0_status(tx_ch)) {
@@ -243,8 +242,7 @@ void comm_init(void) {
 
 // transmit a packet
 int comm_transmit(int to, const void* buffer, int length) {
-    if ((length < 1) || !buffer)
-        return -1;
+    assert((length > 0) && buffer);
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
     uint msk = spin_lock_blocking(lock);
@@ -273,8 +271,7 @@ int comm_receive_ready(void) { return rx_q.head != NULL; }
 
 // Receive a packet
 int comm_receive_blocking(int* from, void* buffer, int buf_length) {
-    if (!buffer || buf_length < 1)
-        return -1;
+    assert((buf_length > 0) && buffer);
     sem_acquire_blocking(&rx_sem);
     uint msk = spin_lock_blocking(lock);
     buf_t* buf = deq(&rx_q);

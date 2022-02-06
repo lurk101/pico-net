@@ -18,17 +18,15 @@
 const char* test_msg = "Hello world ";
 
 static void sputdec2(char* cp, uint32_t n, int first) {
-    uint nl = n % 1000;
-    uint nh = n / 1000;
-    char buf[5];
-    if (nh == 0) {
-        sprintf(buf, "%d", nl);
-        strcat(cp, buf);
-    } else {
+    uint nl = n % 1000, nh = n / 1000;
+    static char buf[4];
+    const char* fmt = "%d";
+    if (nh) {
         sputdec2(cp, nh, 0);
-        sprintf(buf, "%03d", nl);
-        strcat(cp, buf);
+        fmt = "%03d";
     }
+    sprintf(buf, fmt, nl);
+    strcat(cp, buf);
     if (!first)
         strcat(cp, ",");
 }
@@ -48,17 +46,17 @@ int main(void) {
     comm_loop(false);
     printf("baud rate %s\n", sputdec(comm_baud()));
     int from;
-    char buf[32];
+    char buf[64];
     int count = 0;
-    for (int i = N - 1; i > 0; i--) {
+    uint v0 = 1;
+    for (int i = 0; i < N; i++) {
         strcpy(buf, test_msg);
-        strcat(buf, sputdec((uint)-1 >> i));
+        strcat(buf, sputdec(v0));
+        strcat(buf, "-");
+        strcat(buf, sputdec(v0 * 2 - 1));
+        v0 <<= 1;
         comm_transmit(comm_id(), buf, strlen(buf) + 1);
-        i--;
-        strcpy(buf, test_msg);
-        strcat(buf, sputdec((uint)-1 >> i));
-        comm_transmit(comm_id(), buf, strlen(buf) + 1);
-        if (comm_receive_ready()) {
+        if ((i & 1) && comm_receive_ready()) {
             comm_receive_blocking(&from, buf, sizeof(buf));
             count++;
             printf("%s from %u\n", buf, from);
