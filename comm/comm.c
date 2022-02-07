@@ -59,6 +59,7 @@ static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
 static int tx_bsy;                      // tx dma is busy
 static q_t free_q, tx_q, rx_q;          // free buffer pool, tx & rx queues
 static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
+static void (*idle_handler)(void) = NULL;
 
 // push back
 static inline void enq(q_t* q, buf_t* buf) {
@@ -231,11 +232,15 @@ static void init_core1(void) {
     spin_unlock(lock, msk);
     multicore_fifo_push_blocking(0); // tell core 0 we're ready
     for (;;)                         // handle interrupts
-        __wfi();
+        if (idle_handler)
+            idle_handler();
+        else
+            __wfi();
 }
 
 // Launch core 1 to initialize communication
-void comm_init(void) {
+void comm_init(void (*idle)(void)) {
+    idle_handler = idle;
     multicore_launch_core1(init_core1);
     multicore_fifo_pop_blocking(); // wait for core 1 initialized
 }

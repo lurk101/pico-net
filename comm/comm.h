@@ -41,10 +41,11 @@ extern "C" {
 
 // Initialize. Set up the 32 bit PIO UART, 3 DMA channels,
 // and buffer queues.
-// Parameters: none
+// Parameters:
+//    idle - function pointer to core1 idle handler, NULL = none
 // Return: none
 //
-void comm_init(void);
+void comm_init(void (*idle)(void));
 
 // Send a packet.
 // Parameters:

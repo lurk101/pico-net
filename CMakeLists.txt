@@ -21,18 +21,13 @@ add_subdirectory(comm)
 add_subdirectory(stdinit)
 add_subdirectory(sha256)
 
-add_executable(test test.c)
-add_executable(miner miner.c)
-
-pico_enable_stdio_uart(test 1)
-pico_enable_stdio_usb(test 0)
-
-pico_enable_stdio_uart(miner 1)
-pico_enable_stdio_usb(miner 0)
+foreach(name IN ITEMS test miner)
+    add_executable(${name} ${name}.c)
+    pico_enable_stdio_uart(${name} 1)
+    pico_enable_stdio_usb(${name} 0)
+    pico_add_extra_outputs(${name})
+endforeach()
 
 target_link_libraries(test PUBLIC pico_stdlib comm stdinit)
 target_link_libraries(miner PUBLIC pico_stdlib comm stdinit sha256)
-
-pico_add_extra_outputs(test)
-pico_add_extra_outputs(miner)
 

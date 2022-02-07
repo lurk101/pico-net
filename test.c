@@ -42,7 +42,7 @@ static char* sputdec(uint32_t n) {
 int main(void) {
     stdio_init();
     printf("starting\n");
-    comm_init();
+    comm_init(NULL);
     comm_loop(false);
     printf("baud rate %s\n", sputdec(comm_baud()));
     int from;
