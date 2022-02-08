@@ -14,8 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define NODES 1
-
 typedef uint32_t digest_t[8];
 
 enum { start_msg_id = 1, stop_msg_id, solution_msg_id };
@@ -92,13 +90,14 @@ static void process_command(void) {
         m.msg_id = start_msg_id;
         memcpy(m.msgs.start_msg.dgst, digest, sizeof(digest));
         m.msgs.start_msg.diff = diff;
-        for (int n = 0; n < NODES; n++) {
-            m.msgs.start_msg.start = n;
+        uint32_t delta = (1ull << 32) / COMM_NODES;
+        for (int n = 0; n < COMM_NODES; n++) {
+            m.msgs.start_msg.start = n * delta;
             comm_transmit(n, &m, sizeof(m.msgs.start_msg) + 4);
         }
     } else if (strcmp(cp1, "stop") == 0) {
         m.msg_id = stop_msg_id;
-        for (int n = 0; n < NODES; n++)
+        for (int n = 0; n < COMM_NODES; n++)
             comm_transmit(n, &m, 4);
     } else
         printf("Unknown command '%s'\n", cp1);
@@ -151,6 +150,7 @@ static void check_messages(void) {
         printf("Digest: ");
         dump(&digest, sizeof(digest));
         printf("\nDiff: %08x\nStart: %08x from node %d\n", diff, start0, from);
+        printf("Node %d started\n", comm_id());
         mine = 1;
         break;
     case solution_msg_id:
@@ -187,7 +187,7 @@ void check_hash(uint32_t s) {
 void core1_idle(void) {
     if (mine) {
         check_hash(start1);
-        start1 += NODES * 2;
+        start1 += 2;
     }
 }
 
@@ -202,7 +202,7 @@ int main(void) {
         check_messages();
         if (mine) {
             check_hash(start0);
-            start0 += NODES * 2;
+            start0 += 2;
         }
     }
     printf("done\n");

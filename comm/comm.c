@@ -248,6 +248,8 @@ void comm_init(void (*idle)(void)) {
 // transmit a packet
 int comm_transmit(int to, const void* buffer, int length) {
     assert((length > 0) && buffer);
+    if (to >= COMM_NODES)
+        return -1;
     if (length > COMM_PKT_SIZE)
         length = COMM_PKT_SIZE;
     uint msk = spin_lock_blocking(lock);

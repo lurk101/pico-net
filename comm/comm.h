@@ -38,6 +38,7 @@ extern "C" {
 // node in the ring.
 
 #define COMM_PKT_SIZE 256 // Maximum packet size
+#define COMM_NODES 4      // Nodes in ring
 
 // Initialize. Set up the 32 bit PIO UART, 3 DMA channels,
 // and buffer queues.
