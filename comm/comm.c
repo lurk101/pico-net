@@ -29,6 +29,7 @@
 #define ID0_GPIO 11    // bit 0 of node id
 #define TX_GPIO 12     // pio UART TX pin
 #define RX_GPIO 13     // pio UART RX pin
+#define LED_GPIO 22    // tx indicator
 
 // Packet header
 typedef struct PACKED {
@@ -45,18 +46,17 @@ typedef struct PACKED buffer {
 } buf_t;
 
 // Queue
-typedef struct {
+typedef volatile struct {
     buf_t* head; // first entry
     buf_t* tail; // last entry
 } q_t;
 
 static spin_lock_t* lock;               // queue mutual exclusion
-static semaphore_t rx_sem;              // receive synchronization
 static int id;                          // This node's id
 static int loopback = 1;                // loop back on/off
 static int rx_sm, tx_sm;                // rx/tx PIO state machines
 static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
-static int tx_bsy;                      // tx dma is busy
+static volatile int tx_bsy;             // tx dma is busy
 static q_t free_q, tx_q, rx_q;          // free buffer pool, tx & rx queues
 static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
 static void (*idle_handler)(void) = NULL;
@@ -94,12 +94,13 @@ static inline buf_t* get_buffer() {
 
 // Start transmit of 1st entry in tx q
 static void start_tx(void) {
-    if (tx_buf)   // Free transmitted buffer
-        enq(&free_q, tx_buf);
+    if (tx_bsy)
+        return;
     tx_buf = deq(&tx_q); // deq pending message
     if (tx_buf == NULL)
         return;
     tx_bsy = 1; // tx busy
+    gpio_put(LED_GPIO, true);
     // configure and start the TX DMA channel
     // temporarilly use next pointer as word count
     uint words = (tx_buf->pkt.length + sizeof(pkt_t) + 4) & ~3;
@@ -129,14 +130,16 @@ static void dma_irq0_handler(void) {
         uint msk = spin_lock_blocking(lock);
         enq(local ? &rx_q : &tx_q, rx_buf);
         start_rx(); // restart for next message
+        start_tx();
         spin_unlock(lock, msk);
-        if (local)
-            sem_release(&rx_sem);
     }
     // handle transmit
     if (dma_channel_get_irq0_status(tx_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, tx_ch);
+        if (tx_buf) // Free transmitted buffer
+            enq(&free_q, tx_buf);
         tx_bsy = 0;
+        gpio_put(LED_GPIO, false);
         uint msk = spin_lock_blocking(lock);
         start_tx(); // restart TX if more left
         spin_unlock(lock, msk);
@@ -150,6 +153,9 @@ static void common_rx_dma_config(dma_channel_config* c) {
 }
 
 static void init_core1(void) {
+    gpio_init(LED_GPIO);
+    gpio_set_dir(LED_GPIO, GPIO_OUT);
+    gpio_put(LED_GPIO, 0);
     // read node id
     gpio_pull_up(ID0_GPIO);
     gpio_pull_up(ID1_GPIO);
@@ -195,7 +201,6 @@ static void init_core1(void) {
 
     // tx DMA
     free_q.head = free_q.tail = tx_q.head = tx_q.tail = rx_q.head = rx_q.tail = NULL;
-    sem_init(&rx_sem, 0, SHRT_MAX);
     tx_buf = NULL;
     tx_bsy = 0;
     tx_ch = dma_claim_unused_channel(true); // get dma channel for tx
@@ -262,13 +267,8 @@ int comm_transmit(int to, const void* buffer, int length) {
     buf->pkt.to = to;
     memcpy(buf->pkt.data, buffer, length);
     msk = spin_lock_blocking(lock);
-    if (loopback && (buf->pkt.to == id)) {
-        enq(&rx_q, buf);
-        sem_release(&rx_sem);
-    } else
-        enq(&tx_q, buf);
-    if (!tx_bsy) // Already busy?
-        start_tx();
+    enq((loopback && (buf->pkt.to == id)) ? &rx_q : &tx_q, buf);
+    start_tx();
     spin_unlock(lock, msk);
     return length;
 }
@@ -279,7 +279,8 @@ int comm_receive_ready(void) { return rx_q.head != NULL; }
 // Receive a packet
 int comm_receive_blocking(int* from, void* buffer, int buf_length) {
     assert((buf_length > 0) && buffer);
-    sem_acquire_blocking(&rx_sem);
+    while (!comm_receive_ready())
+        tight_loop_contents();
     uint msk = spin_lock_blocking(lock);
     buf_t* buf = deq(&rx_q);
     spin_unlock(lock, msk);

@@ -22,8 +22,8 @@ typedef struct {
     uint32_t msg_id;
     union {
         struct {
-            digest_t dgst;
-            uint32_t diff;
+            digest_t hdr;
+            uint32_t targ;
             uint32_t start;
         } start_msg;
         struct {
@@ -33,13 +33,13 @@ typedef struct {
 } msg_t;
 
 static int master;
-static digest_t digest;
-static uint32_t diff;
+static uint32_t target;
 static uint32_t start0, start1;
 static uint32_t mine = 0;
 
 static char line[128];
 static uint32_t start_time;
+static char header[512 / 8];
 
 static char* skip_blanks(char* cp) {
     while (*cp && ((*cp == ' ') || (*cp == '\t')))
@@ -51,12 +51,6 @@ static char* skip_to_blank(char* cp) {
     while (*cp && (*cp != ' ') && (*cp != '\t'))
         cp++;
     return cp;
-}
-
-static void dump(void* buf, uint32_t len) {
-    uint8_t* cp = (char*)buf;
-    while (len--)
-        printf("%02x", *cp++);
 }
 
 static void process_command(void) {
@@ -71,25 +65,21 @@ static void process_command(void) {
         if (*cp3 == 0)
             printf("Need to specify block content\n");
         else {
-            printf("SHA256 hash of '%s' is: ", cp3);
-            sha256_t s256;
-            sha256_init(&s256);
-            sha256_update(&s256, cp3, strlen(cp3));
-            sha256_digest(&s256, &digest);
-            dump(&digest, sizeof(digest_t));
-            printf("\n");
+            printf("header is '%s' padded with zeros to 64 bytes\n", cp3);
+            memset(header, 0, sizeof(header));
+            strcpy(header, cp3);
         }
-    } else if (strcmp(cp1, "dif") == 0) {
+    } else if (strcmp(cp1, "targ") == 0) {
         if (*cp3 == 0)
-            printf("Need to specify a difficulty\n");
+            printf("Need to specify a target value\n");
         else {
-            sscanf(cp3, "%u", &diff);
-            printf("Difficulty is: %08x\n", diff);
+            sscanf(cp3, "%u", &target);
+            printf("Target is: %08x\n", target);
         }
     } else if (strcmp(cp1, "start") == 0) {
         m.msg_id = start_msg_id;
-        memcpy(m.msgs.start_msg.dgst, digest, sizeof(digest));
-        m.msgs.start_msg.diff = diff;
+        memcpy(m.msgs.start_msg.hdr, header, sizeof(header));
+        m.msgs.start_msg.targ = target;
         uint32_t delta = (1ull << 32) / COMM_NODES;
         for (int n = 0; n < COMM_NODES; n++) {
             m.msgs.start_msg.start = n * delta;
@@ -142,44 +132,42 @@ static void check_messages(void) {
     switch (m.msg_id) {
     case start_msg_id:
         start_time = time_us_32();
-        memcpy(digest, m.msgs.start_msg.dgst, sizeof(digest));
-        diff = m.msgs.start_msg.diff;
+        memcpy(header, m.msgs.start_msg.hdr, sizeof(header));
+        target = m.msgs.start_msg.targ;
         start0 = m.msgs.start_msg.start;
         start1 = start0 + 1;
         master = from;
-        printf("Digest: ");
-        dump(&digest, sizeof(digest));
-        printf("\nDiff: %08x\nStart: %08x from node %d\n", diff, start0, from);
-        printf("Node %d started\n", comm_id());
+        printf("Header: %s\nTarget: %08x\nStart:  %08x from node %d\nNode %d searching\n", header,
+               target, start0, from, comm_id());
         mine = 1;
         break;
     case solution_msg_id:
-        printf("Got solution %08x from node %d\n", m.msgs.solution_msg.start, from);
-        printf("Hash rate: %u H/s\n",
-               (uint32_t)(m.msgs.solution_msg.start * 1e6 / (time_us_32() - start_time)));
+        printf("Solution %08x from node %d at %.2f\n", m.msgs.solution_msg.start, from,
+               (time_us_32() - start_time) / 1e6);
         break;
     case stop_msg_id:
         mine = 0;
         printf("Node %d stopped\n", comm_id());
         break;
-    default:;
     }
 }
 
 void check_hash(uint32_t s) {
     sha256_t s256;
     sha256_init(&s256);
-    sha256_update(&s256, &digest, sizeof(digest));
+    sha256_update(&s256, header, sizeof(header));
     sha256_update(&s256, &s, sizeof(s));
     digest_t dgst;
     sha256_digest(&s256, &dgst);
     sha256_init(&s256);
     sha256_update(&s256, &dgst, sizeof(dgst));
     sha256_digest(&s256, &dgst);
-    if (__builtin_bswap32(dgst[0]) <= diff) {
+    if (__builtin_bswap32(dgst[0]) <= target) {
         msg_t m;
         m.msg_id = solution_msg_id;
         m.msgs.solution_msg.start = s;
+        if (comm_id() != master)
+            printf("Found %08x\n", s);
         comm_transmit(master, &m, sizeof(m.msgs.solution_msg) + 4);
     }
 }
@@ -194,8 +182,8 @@ void core1_idle(void) {
 // application entry point
 int main(void) {
     stdio_init();
-    printf("starting\n");
     comm_init(core1_idle);
+    printf("Starting Bitcoin miner node %d\n", comm_id());
     comm_loop(true);
     for (;;) {
         check_console();
@@ -205,5 +193,5 @@ int main(void) {
             start0 += 2;
         }
     }
-    printf("done\n");
+    printf("Done\n");
 }

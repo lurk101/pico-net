@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "reset halt" > flash.cfg
-echo "load $2.elf" >> flash.cfg
-echo "reset halt" >> flash.cfg
-openocd -f /home/pi/openocd/raspberrypi-swd-$1.cfg -f target/rp2040.cfg -f flash.cfg
+for pico in {0..3}
+do
+openocd -f /home/pi/openocd/raspberrypi-swd-$pico.cfg -f target/rp2040.cfg -c "program $1; exit"
+done
