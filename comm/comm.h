@@ -38,7 +38,7 @@ extern "C" {
 // node in the ring.
 
 #define COMM_PKT_SIZE 256 // Maximum packet size
-#define COMM_NODES 4      // Nodes in ring
+#define COMM_NODES 4      // Nodes in ring and broadcast address
 
 // Initialize. Set up the 32 bit PIO UART, 3 DMA channels,
 // and buffer queues.
@@ -53,18 +53,18 @@ void comm_init(void (*idle)(void));
 //    to - destination node id
 //    buffer - pointer to packet data
 //    length - length of packet
-// Return: bytes sent, -1 for error.
+// Return: none.
 //
-int comm_transmit(int to, const void* buffer, int length);
+void comm_transmit(int to, const void* buffer, int length);
 
 // receive packet
 // Parameters:
 //    from - pointer to packet's source node id
 //    buffer - pointer to packet data
 //    length - length of packet buffer
-// Return: bytes received, -1 for error.
+// Return: none.
 //
-int comm_receive_blocking(int* from, void* buffer, int buf_size);
+void comm_receive_blocking(int* from, void* buffer, int buf_size);
 
 // Packet available ?
 // Parameters: none
@@ -83,16 +83,6 @@ int comm_id(void);
 // Return: UART link's bit rate
 //
 int comm_baud(void);
-
-// Set loopback mode. With loopback enabled (the default mode) packets
-// sent to self bypass the transmiter and are directly queue to the
-// receive queue. With loopback disabled such a packet would be transmited
-// once around the ring.
-// Parameters:
-//    enable - 0 disable loopback, otherwise enable
-// Return: none
-//
-void comm_loop(int enable);
 
 #ifdef __cplusplus
 }

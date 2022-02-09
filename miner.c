@@ -11,24 +11,28 @@
 #include "stdinit.h"
 
 #include "pico/stdlib.h"
+
 #include <stdio.h>
 #include <string.h>
 
 typedef uint32_t digest_t[8];
 
-enum { start_msg_id = 1, stop_msg_id, solution_msg_id };
+enum { start_msg_id = 0, stop_msg_id, solution_msg_id };
 
 typedef struct {
     uint32_t msg_id;
     union {
         struct {
             digest_t hdr;
-            uint32_t targ;
+            uint32_t bits;
             uint32_t start;
         } start_msg;
         struct {
             uint32_t start;
         } solution_msg;
+        struct {
+            uint8_t filler;
+        } stop_msg;
     } msgs;
 } msg_t;
 
@@ -53,15 +57,32 @@ static char* skip_to_blank(char* cp) {
     return cp;
 }
 
+uint32_t targ_to_bits(uint32_t t) {
+    uint32_t l = 32;
+    while (t && ((t & 0xff000000) == 0)) {
+        l--;
+        t <<= 8;
+    }
+    return (t >> 8) | (l << 24);
+}
+
+uint32_t bits_to_targ(uint32_t b) {
+    uint32_t l = b >> 24;
+    b = (b & 0xffffff) << 8;
+    while (l < 32) {
+        l++;
+        b >>= 8;
+    }
+    return b;
+}
+
 static void process_command(void) {
     msg_t m;
     char* cp1 = skip_blanks(line);
     char* cp2 = skip_to_blank(cp1);
     char* cp3 = skip_blanks(cp2);
-    char* cp4 = skip_to_blank(cp3);
     *cp2 = 0;
-    *cp4 = 0;
-    if (strcmp(cp1, "block") == 0) {
+    if (strcmp(cp1, "head") == 0) {
         if (*cp3 == 0)
             printf("Need to specify block content\n");
         else {
@@ -76,10 +97,10 @@ static void process_command(void) {
             sscanf(cp3, "%u", &target);
             printf("Target is: %08x\n", target);
         }
-    } else if (strcmp(cp1, "start") == 0) {
+    } else if (strcmp(cp1, "go") == 0) {
         m.msg_id = start_msg_id;
         memcpy(m.msgs.start_msg.hdr, header, sizeof(header));
-        m.msgs.start_msg.targ = target;
+        m.msgs.start_msg.bits = targ_to_bits(target);
         uint32_t delta = (1ull << 32) / COMM_NODES;
         for (int n = 0; n < COMM_NODES; n++) {
             m.msgs.start_msg.start = n * delta;
@@ -87,8 +108,7 @@ static void process_command(void) {
         }
     } else if (strcmp(cp1, "stop") == 0) {
         m.msg_id = stop_msg_id;
-        for (int n = 0; n < COMM_NODES; n++)
-            comm_transmit(n, &m, 4);
+        comm_transmit(COMM_NODES, &m, sizeof(m.msgs.stop_msg) + 4);
     } else
         printf("Unknown command '%s'\n", cp1);
 }
@@ -133,7 +153,7 @@ static void check_messages(void) {
     case start_msg_id:
         start_time = time_us_32();
         memcpy(header, m.msgs.start_msg.hdr, sizeof(header));
-        target = m.msgs.start_msg.targ;
+        target = bits_to_targ(m.msgs.start_msg.bits);
         start0 = m.msgs.start_msg.start;
         start1 = start0 + 1;
         master = from;
@@ -183,8 +203,7 @@ void core1_idle(void) {
 int main(void) {
     stdio_init();
     comm_init(core1_idle);
-    printf("Starting Bitcoin miner node %d\n", comm_id());
-    comm_loop(true);
+    printf("Starting Bitcoin miner node %d\nLink speed: %u baud\n", comm_id(), comm_baud());
     for (;;) {
         check_console();
         check_messages();
