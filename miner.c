@@ -25,7 +25,7 @@ typedef struct {
         struct {
             digest_t hdr;
             uint32_t bits;
-            uint32_t start;
+            uint32_t nonce;
         } start_msg;
         struct {
             uint32_t start;
@@ -38,7 +38,7 @@ typedef struct {
 
 static int master;
 static uint32_t target;
-static uint32_t start0, start1;
+static uint32_t nonce_core0, nonce_core1;
 static uint32_t mine = 0;
 
 static char line[128];
@@ -103,7 +103,7 @@ static void process_command(void) {
         m.msgs.start_msg.bits = targ_to_bits(target);
         uint32_t delta = (1ull << 32) / COMM_NODES;
         for (int n = 0; n < COMM_NODES; n++) {
-            m.msgs.start_msg.start = n * delta;
+            m.msgs.start_msg.nonce = n * delta;
             comm_transmit(n, &m, sizeof(m.msgs.start_msg) + 4);
         }
     } else if (strcmp(cp1, "stop") == 0) {
@@ -154,11 +154,11 @@ static void check_messages(void) {
         start_time = time_us_32();
         memcpy(header, m.msgs.start_msg.hdr, sizeof(header));
         target = bits_to_targ(m.msgs.start_msg.bits);
-        start0 = m.msgs.start_msg.start;
-        start1 = start0 + 1;
+        nonce_core0 = m.msgs.start_msg.nonce;
+        nonce_core1 = nonce_core0 + 1;
         master = from;
         printf("Header: %s\nTarget: %08x\nStart:  %08x from node %d\nNode %d searching\n", header,
-               target, start0, from, comm_id());
+               target, nonce_core0, from, comm_id());
         mine = 1;
         break;
     case solution_msg_id:
@@ -194,8 +194,8 @@ void check_hash(uint32_t s) {
 
 void core1_idle(void) {
     if (mine) {
-        check_hash(start1);
-        start1 += 2;
+        check_hash(nonce_core1);
+        nonce_core1 += 2;
     }
 }
 
@@ -208,8 +208,8 @@ int main(void) {
         check_console();
         check_messages();
         if (mine) {
-            check_hash(start0);
-            start0 += 2;
+            check_hash(nonce_core0);
+            nonce_core0 += 2;
         }
     }
     printf("Done\n");

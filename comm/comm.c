@@ -117,33 +117,36 @@ static void start_rx(void) {
     dma_channel_start(rx_ctl_ch);
 }
 
+static void forward(buf_t* buf) {
+    if (buf->pkt.to == id)
+        enq(&rx_q, buf);
+    else {
+        if (buf->pkt.hops == 0)
+            enq(&free_q, buf);
+        else {
+            if (buf->pkt.to == COMM_NODES) {
+                buf_t* buf2 = get_buffer();
+                if (buf2 == NULL)
+                    panic("No buffers");
+                memcpy(&buf2->pkt, &buf->pkt, sizeof(pkt_t) + buf->pkt.length + 1);
+                enq(&rx_q, buf2);
+            }
+            enq(&tx_q, buf);
+        }
+    }
+}
+
 // Handle TX or RX dma done interrupt
 static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
+    uint msk = spin_lock_blocking(lock);
     if (dma_channel_get_irq0_status(rx_dat_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, rx_dat_ch);
         // forward the message
-        uint msk = spin_lock_blocking(lock);
-        if (rx_buf->pkt.to == id)
-            enq(&rx_q, rx_buf);
-        else {
-            rx_buf->pkt.hops--;
-            if (rx_buf->pkt.hops == 0)
-                enq(&free_q, rx_buf);
-            else {
-                if (rx_buf->pkt.to == COMM_NODES) {
-                    buf_t* buf = get_buffer();
-                    if (buf == NULL)
-                        panic("No buffers");
-                    memcpy(&buf->pkt, &rx_buf->pkt, sizeof(pkt_t) + rx_buf->pkt.length + 1);
-                    enq(&rx_q, buf);
-                }
-                enq(&tx_q, rx_buf);
-            }
-        }
+        rx_buf->pkt.hops--;
+        forward(rx_buf);
         start_rx(); // restart rx for next message length
         start_tx(); // restart tx if not already started
-        spin_unlock(lock, msk);
     }
     // handle transmit
     if (dma_channel_get_irq0_status(tx_ch)) {
@@ -151,10 +154,9 @@ static void dma_irq0_handler(void) {
         if (tx_buf) // Free transmitted buffer
             enq(&free_q, tx_buf);
         gpio_put(LED_GPIO, false);
-        uint msk = spin_lock_blocking(lock);
         start_tx(); // restart TX if more left
-        spin_unlock(lock, msk);
     }
+    spin_unlock(lock, msk);
 }
 
 static void common_rx_dma_config(dma_channel_config* c) {
@@ -271,19 +273,8 @@ void comm_transmit(int to, const void* buffer, int length) {
     buf->pkt.to = to;
     buf->pkt.hops = COMM_NODES;
     memcpy(buf->pkt.data, buffer, length);
-    buf_t* buf2 = NULL;
-    if (to == COMM_NODES) {
-        msk = spin_lock_blocking(lock);
-        buf2 = get_buffer();
-        spin_unlock(lock, msk);
-        if (buf2 == NULL)
-            panic("No tx buffers");
-        memcpy(&buf2->pkt, &buf->pkt, sizeof(pkt_t) + length);
-    }
     msk = spin_lock_blocking(lock);
-    enq(buf->pkt.to == id ? &rx_q : &tx_q, buf);
-    if (buf2)
-        enq(&rx_q, buf2);
+    forward(buf);
     start_tx();
     spin_unlock(lock, msk);
 }
