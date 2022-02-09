@@ -1,4 +1,5 @@
-Pico network protocol stack, physical, data link and network layers.
+# Pico network protocol stack, physical, data link and network layers.
+![multi pico carrier](images/board.png)
 
 Physical layer
 
