@@ -285,7 +285,7 @@ void comm_transmit(int to, const void* buffer, int length) {
 int comm_receive_ready(void) { return rx_q.head != NULL; }
 
 // Receive a packet
-void comm_receive_blocking(int* from, void* buffer, int buf_length) {
+int comm_receive_blocking(int* from, void* buffer, int buf_length) {
     while (!comm_receive_ready())
         tight_loop_contents();
     uint msk = spin_lock_blocking(lock);
@@ -301,6 +301,7 @@ void comm_receive_blocking(int* from, void* buffer, int buf_length) {
     msk = spin_lock_blocking(lock);
     enq(&free_q, buf);
     spin_unlock(lock, msk);
+    return l;
 }
 
 // return node's id

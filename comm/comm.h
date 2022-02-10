@@ -62,9 +62,9 @@ void comm_transmit(int to, const void* buffer, int length);
 //    from - pointer to packet's source node id
 //    buffer - pointer to packet data
 //    length - length of packet buffer
-// Return: none.
+// Return: length of received packet
 //
-void comm_receive_blocking(int* from, void* buffer, int buf_size);
+int comm_receive_blocking(int* from, void* buffer, int buf_size);
 
 // Packet available ?
 // Parameters: none
