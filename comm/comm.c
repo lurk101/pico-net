@@ -53,12 +53,12 @@ typedef volatile struct {
 } q_t;
 
 static spin_lock_t* lock;               // queue mutual exclusion
-static int id;                          // This node's id
+static int node_id;                     // This node's id
 static int rx_sm, tx_sm;                // rx/tx PIO state machines
 static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
 static q_t free_q, tx_q, rx_q;          // free buffer pool, tx & rx queues
 static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
-static void (*idle_handler)(void) = NULL;
+static void (*idle_handler)(void) = NULL; // core1 idle call
 
 // push back
 static inline void enq(q_t* q, buf_t* buf) {
@@ -119,19 +119,19 @@ static void start_rx(void) {
 
 // Direct incoming packet to the appropriate destination
 static void forward(buf_t* buf) {
-    if (buf->pkt.to == id)
+    if (buf->pkt.to == node_id)
         enq(&rx_q, buf);
     else {
-        if (buf->pkt.hops == 0) // unicast to this node
-            enq(&free_q, buf);
+        if (buf->pkt.hops == 0)
+            enq(buf->pkt.to == COMM_NODES ? &rx_q : &free_q, buf);
         else {
-            if (buf->pkt.to == COMM_NODES) { // broadast
+            if (buf->pkt.to == COMM_NODES) { // broadcast
                 buf_t* buf2 = get_buffer();
                 // make a copy and q it to receive q
                 memcpy(&buf2->pkt, &buf->pkt, sizeof(pkt_t) + buf->pkt.length);
-                enq(&rx_q, buf2); // enq for retransmission
+                enq(&rx_q, buf2);
             }
-            enq(&tx_q, buf);
+            enq(&tx_q, buf); // enq for retransmission
         }
     }
 }
@@ -141,8 +141,9 @@ static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
     if (dma_channel_get_irq0_status(rx_dat_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, rx_dat_ch);
-        // forward the message
+        // decrement the hop count
         rx_buf->pkt.hops--;
+        // forward the message
         uint msk = spin_lock_blocking(lock);
         forward(rx_buf);
         start_rx(); // restart rx for next message length
@@ -177,7 +178,7 @@ static void init_core1(void) {
     gpio_set_dir(ID0_GPIO, GPIO_IN);
     gpio_set_dir(ID1_GPIO, GPIO_IN);
     busy_wait_us_32(10);
-    id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
+    node_id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
 
     // 32 bit PIO UART
     // TX pio
@@ -269,9 +270,9 @@ void comm_transmit(int to, const void* buffer, int length) {
     buf_t* buf = get_buffer();
     spin_unlock(lock, msk);
     buf->pkt.length = length;
-    buf->pkt.from = id;
+    buf->pkt.from = node_id;
     buf->pkt.to = to;
-    buf->pkt.hops = COMM_NODES;
+    buf->pkt.hops = COMM_NODES - 1;
     if (length)
         memcpy(buf->pkt.data, buffer, length);
     msk = spin_lock_blocking(lock);
@@ -303,7 +304,7 @@ void comm_receive_blocking(int* from, void* buffer, int buf_length) {
 }
 
 // return node's id
-int comm_id(void) { return id; }
+int comm_id(void) { return node_id; }
 
 // return effective communication baud rate (8 PIO clocks per bit)
 int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * BIT_CLKS); }
