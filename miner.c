@@ -23,7 +23,7 @@ typedef struct {
     uint32_t msg_id;
     union {
         struct {
-            digest_t hdr;
+            char hdr[512 / 8];
             uint32_t bits;
             uint32_t nonce;
         } start_msg;
@@ -31,7 +31,6 @@ typedef struct {
             uint32_t start;
         } solution_msg;
         struct {
-            uint8_t filler;
         } stop_msg;
     } msgs;
 } msg_t;

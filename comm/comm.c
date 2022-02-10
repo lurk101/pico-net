@@ -29,15 +29,15 @@
 #define ID0_GPIO 11    // bit 0 of node id
 #define TX_GPIO 12     // pio UART TX pin
 #define RX_GPIO 13     // pio UART RX pin
-#define LED_GPIO 22    // tx indicator
+#define LED_GPIO 22    // tx bsy flag and indicator
 
 // Packet header
 typedef struct PACKED {
-    uint8_t length;   // length of packet data in bytes
-    uint8_t from : 4; // source node
-    uint8_t to : 4;   // destination node
-    uint8_t hops : 4; //
-    uint8_t data[0];  // message data
+    uint16_t length : 12; // length of packet data in bytes
+    uint16_t from : 4;    // source node
+    uint8_t to : 4;       // destination node
+    uint8_t hops : 4;     // hop count
+    uint8_t data[0];      // message data
 } pkt_t;
 
 // Buffer
@@ -86,6 +86,8 @@ static inline buf_t* get_buffer() {
     buf_t* buf = deq(&free_q);
     if (buf == NULL)
         buf = malloc(sizeof(buf_t) + COMM_PKT_SIZE);
+    if (buf == NULL)
+        panic("No RX/TX buffers");
     return buf;
 }
 
@@ -100,36 +102,34 @@ static void start_tx(void) {
     gpio_put(LED_GPIO, true);
     // configure and start the TX DMA channel
     // temporarilly use next pointer as word count
-    uint words = (tx_buf->pkt.length + sizeof(pkt_t) + 4) & ~3;
+    uint words = (tx_buf->pkt.length + sizeof(pkt_t) + 3) & ~3;
     tx_buf->next = (buf_t*)words;
     dma_channel_set_trans_count(tx_ch, words + 1, false);
     dma_channel_set_read_addr(tx_ch, tx_buf, true);
 }
 
-// Start the 1 tx dma to retrieve the buffer length into the 2 tx dma descriptor
+// Start the 1st rx dma to retrieve the buffer length into the 2nd rx dma descriptor
 static void start_rx(void) {
     // allocate a max size receive buffer
     rx_buf = get_buffer();
-    if (rx_buf == NULL)
-        panic("Out of comm buffers");
     // the length will be written directly to the data DMA descriptor
     dma_channel_set_write_addr(rx_dat_ch, &rx_buf->pkt, false);
     dma_channel_start(rx_ctl_ch);
 }
 
+// Direct incoming packet to the appropriate destination
 static void forward(buf_t* buf) {
     if (buf->pkt.to == id)
         enq(&rx_q, buf);
     else {
-        if (buf->pkt.hops == 0)
+        if (buf->pkt.hops == 0) // unicast to this node
             enq(&free_q, buf);
         else {
-            if (buf->pkt.to == COMM_NODES) {
+            if (buf->pkt.to == COMM_NODES) { // broadast
                 buf_t* buf2 = get_buffer();
-                if (buf2 == NULL)
-                    panic("No buffers");
-                memcpy(&buf2->pkt, &buf->pkt, sizeof(pkt_t) + buf->pkt.length + 1);
-                enq(&rx_q, buf2);
+                // make a copy and q it to receive q
+                memcpy(&buf2->pkt, &buf->pkt, sizeof(pkt_t) + buf->pkt.length);
+                enq(&rx_q, buf2); // enq for retransmission
             }
             enq(&tx_q, buf);
         }
@@ -139,24 +139,26 @@ static void forward(buf_t* buf) {
 // Handle TX or RX dma done interrupt
 static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
-    uint msk = spin_lock_blocking(lock);
     if (dma_channel_get_irq0_status(rx_dat_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, rx_dat_ch);
         // forward the message
         rx_buf->pkt.hops--;
+        uint msk = spin_lock_blocking(lock);
         forward(rx_buf);
         start_rx(); // restart rx for next message length
         start_tx(); // restart tx if not already started
+        spin_unlock(lock, msk);
     }
     // handle transmit
     if (dma_channel_get_irq0_status(tx_ch)) {
         dma_irqn_acknowledge_channel(DMA_IRQ_0, tx_ch);
+        uint msk = spin_lock_blocking(lock);
         if (tx_buf) // Free transmitted buffer
             enq(&free_q, tx_buf);
         gpio_put(LED_GPIO, false);
         start_tx(); // restart TX if more left
+        spin_unlock(lock, msk);
     }
-    spin_unlock(lock, msk);
 }
 
 static void common_rx_dma_config(dma_channel_config* c) {
@@ -266,13 +268,12 @@ void comm_transmit(int to, const void* buffer, int length) {
     uint msk = spin_lock_blocking(lock);
     buf_t* buf = get_buffer();
     spin_unlock(lock, msk);
-    if (buf == NULL)
-        panic("No tx buffers");
-    buf->pkt.length = length - 1;
+    buf->pkt.length = length;
     buf->pkt.from = id;
     buf->pkt.to = to;
     buf->pkt.hops = COMM_NODES;
-    memcpy(buf->pkt.data, buffer, length);
+    if (length)
+        memcpy(buf->pkt.data, buffer, length);
     msk = spin_lock_blocking(lock);
     forward(buf);
     start_tx();
@@ -291,10 +292,11 @@ void comm_receive_blocking(int* from, void* buffer, int buf_length) {
     spin_unlock(lock, msk);
     if (from)
         *from = buf->pkt.from;
-    uint8_t l = buf->pkt.length + 1;
+    uint8_t l = buf->pkt.length;
     if (l > buf_length)
         l = buf_length;
-    memcpy(buffer, buf->pkt.data, l);
+    if (l)
+        memcpy(buffer, buf->pkt.data, l);
     msk = spin_lock_blocking(lock);
     enq(&free_q, buf);
     spin_unlock(lock, msk);

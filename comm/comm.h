@@ -37,8 +37,8 @@ extern "C" {
 // retrieval. If the packet is not for his node it is transmitted to the next
 // node in the ring.
 
-#define COMM_PKT_SIZE 256 // Maximum packet size
-#define COMM_NODES 4      // Nodes in ring and broadcast address
+#define COMM_PKT_SIZE 1024 // Maximum packet size
+#define COMM_NODES 4       // Nodes in ring and broadcast address
 
 // Initialize. Set up the 32 bit PIO UART, 3 DMA channels,
 // and buffer queues.
