@@ -24,12 +24,11 @@
 #define PACKED __attribute__((__packed__))
 
 #define CMN_PIO pio0   // TX/RX PIO
-#define PIO_CLK_DIV 3  // 125 MHz / 3 = 41.6 MHz (4 clks / bit)
-#define ID1_GPIO 10    // bit 1 of 2 bit node id
-#define ID0_GPIO 11    // bit 0 of node id
+#define PIO_CLK_DIV 4  // 125 MHz / 4 = 31.25 MHz (8 clks / bit)
+#define ID0_GPIO 10    // bit 0 of node id
+#define ID1_GPIO 11    // bit 1 of 2 bit node id
 #define TX_GPIO 12     // pio UART TX pin
 #define RX_GPIO 13     // pio UART RX pin
-#define LED_GPIO PICO_DEFAULT_LED_PIN // tx bsy flag and indicator
 
 // Packet header
 typedef struct PACKED {
@@ -58,6 +57,7 @@ static int rx_sm, tx_sm;                // rx/tx PIO state machines
 static int tx_ch, rx_ctl_ch, rx_dat_ch; // dma channels
 static q_t free_q, tx_q, rx_q;          // free buffer pool, tx & rx queues
 static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
+static volatile int tx_bsy;             // transmitter busy status
 static void (*idle_handler)(void) = NULL; // core1 idle call
 
 // push back
@@ -96,12 +96,12 @@ static inline buf_t* get_buffer() {
 // Start transmit of 1st entry in tx q
 static void start_tx(void) {
     // if tx dma already bsy, no need to restart it
-    if (gpio_get(LED_GPIO))
+    if (tx_bsy)
         return;
     tx_buf = deq(&tx_q); // deq pending message
     if (tx_buf == NULL)
         return; // Nothing to send, don't start
-    gpio_put(LED_GPIO, true);
+    tx_bsy = 1;
     // configure and start the TX DMA channel
     // temporarilly use next pointer as word count
     uint words = (tx_buf->pkt.length + sizeof(pkt_t) + 3) & ~3;
@@ -158,7 +158,7 @@ static void dma_irq0_handler(void) {
         uint msk = spin_lock_blocking(lock);
         if (tx_buf) // Free transmitted buffer
             enq(&free_q, tx_buf);
-        gpio_put(LED_GPIO, false);
+        tx_bsy = 0;
         start_tx(); // restart TX if more left
         spin_unlock(lock, msk);
     }
@@ -171,16 +171,13 @@ static void common_rx_dma_config(dma_channel_config* c) {
 }
 
 static void init_core1(void) {
-    gpio_init(LED_GPIO);
-    gpio_set_dir(LED_GPIO, GPIO_OUT);
-    gpio_put(LED_GPIO, 0);
     // read node id
     gpio_pull_up(ID0_GPIO);
     gpio_pull_up(ID1_GPIO);
     gpio_set_dir(ID0_GPIO, GPIO_IN);
     gpio_set_dir(ID1_GPIO, GPIO_IN);
     busy_wait_us_32(10);
-    node_id = (gpio_get(ID0_GPIO) ? 1 : 0) | (gpio_get(ID1_GPIO) ? 2 : 0);
+    node_id = gpio_get(ID0_GPIO) | (gpio_get(ID1_GPIO) << 1);
 
     // 32 bit PIO UART
     // TX pio
@@ -216,6 +213,7 @@ static void init_core1(void) {
     // tx DMA
     free_q.head = free_q.tail = tx_q.head = tx_q.tail = rx_q.head = rx_q.tail = NULL;
     tx_buf = NULL;
+    tx_bsy = 0;
     tx_ch = dma_claim_unused_channel(true); // get dma channel for tx
     dma_channel_config c = dma_channel_get_default_config(tx_ch);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
