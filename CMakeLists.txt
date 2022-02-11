@@ -12,7 +12,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-project(test C CXX ASM)
 project(miner C CXX ASM)
 
 pico_sdk_init()
