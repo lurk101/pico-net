@@ -11,5 +11,5 @@ Data link layer.
 
 Network layer
 
-Packet routing is accomplished using a simple 1 byte node id. The nodes are organized in a unidirectional ring, and each node acts as an add-drop multiplexer. A packet received with a destination address matching the node's id it is queued on the nodes received packet queue for application retrieval. If the packet is not for his node it is transmitted to the next node in the ring.
+Packet routing is accomplished using a simple 4 bit node id. The nodes are organized in a unidirectional ring, and each node acts as an add-drop multiplexer. A packet received with a destination address matching the node's id it is queued on the nodes received packet queue for application retrieval. If the packet is not for his node it is transmitted to the next node in the ring. In order to achieve efficient memory management and limit the size of receive buffer a packet size limit of 1024 bytes is imposed.
 

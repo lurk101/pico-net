@@ -12,7 +12,6 @@ set(CMAKE_CXX_STANDARD 17)
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
-project(test C CXX ASM)
 project(miner C CXX ASM)
 
 pico_sdk_init()
@@ -23,10 +22,15 @@ add_subdirectory(sha256)
 
 add_executable(miner miner.c)
 
-target_compile_definitions(miner PRIVATE PICO_MALLOC_PANIC=0)
-target_link_libraries(miner PUBLIC pico_stdlib comm stdinit sha256)
+target_link_libraries(miner PUBLIC
+    pico_stdlib
+    comm
+    stdinit
+    sha256
+)
 
 pico_enable_stdio_uart(miner 1)
 pico_enable_stdio_usb(miner 0)
+
 pico_add_extra_outputs(miner)
 

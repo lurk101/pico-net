@@ -24,12 +24,12 @@
 #define PACKED __attribute__((__packed__))
 
 #define CMN_PIO pio0   // TX/RX PIO
-#define PIO_CLK_DIV 10 // 125 MHz / 10 = 12.5 MHz (8 clks / bit)
+#define PIO_CLK_DIV 3  // 125 MHz / 3 = 41.6 MHz (4 clks / bit)
 #define ID1_GPIO 10    // bit 1 of 2 bit node id
 #define ID0_GPIO 11    // bit 0 of node id
 #define TX_GPIO 12     // pio UART TX pin
 #define RX_GPIO 13     // pio UART RX pin
-#define LED_GPIO 22    // tx bsy flag and indicator
+#define LED_GPIO PICO_DEFAULT_LED_PIN // tx bsy flag and indicator
 
 // Packet header
 typedef struct PACKED {
@@ -86,8 +86,10 @@ static inline buf_t* get_buffer() {
     buf_t* buf = deq(&free_q);
     if (buf == NULL)
         buf = malloc(sizeof(buf_t) + COMM_PKT_SIZE);
+#if !PICO_MALLOC_PANIC
     if (buf == NULL)
         panic("No RX/TX buffers");
+#endif
     return buf;
 }
 
