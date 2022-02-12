@@ -5,7 +5,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-
 #include "comm.h"
 #include "sha256.h"
 #include "stdinit.h"
@@ -14,8 +13,6 @@
 
 #include <stdio.h>
 #include <string.h>
-
-typedef uint32_t digest_t[8];
 
 enum { start_msg_id = 0, stop_msg_id, solution_msg_id };
 
@@ -176,7 +173,7 @@ void check_hash(uint32_t s) {
     sha256_init(&s256);
     sha256_update(&s256, header, sizeof(header));
     sha256_update(&s256, &s, sizeof(s));
-    digest_t dgst;
+    uint dgst[8];
     sha256_digest(&s256, &dgst);
     sha256_init(&s256);
     sha256_update(&s256, &dgst, sizeof(dgst));
@@ -211,5 +208,4 @@ int main(void) {
             nonce_core0 += 2;
         }
     }
-    printf("Done\n");
 }

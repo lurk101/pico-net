@@ -23,8 +23,8 @@
 
 #define PACKED __attribute__((__packed__))
 
-#define CMN_PIO pio0   // TX/RX PIO
-#define PIO_CLK_DIV 4  // 125 MHz / 4 = 31.25 MHz (8 clks / bit)
+#define PIO pio0       // TX/RX PIO
+#define SM_CLK_DIV 4   // 125 MHz / 4 = 31.25 MHz (8 clks / bit)
 #define ID0_GPIO 10    // bit 0 of node id
 #define ID1_GPIO 11    // bit 1 of 2 bit node id
 #define TX_GPIO 12     // pio UART TX pin
@@ -60,6 +60,8 @@ static buf_t *tx_buf, *rx_buf;          // current receive and transmit buffer
 static volatile int tx_bsy;             // transmitter busy status
 static void (*idle_handler)(void) = NULL; // core1 idle call
 
+// Low level functions. Must be called with lock held.
+
 // push back
 static inline void enq(q_t* q, buf_t* buf) {
     buf->next = NULL;
@@ -76,8 +78,6 @@ static inline buf_t* deq(q_t* q) {
         return NULL;
     buf_t* buf = q->head;
     q->head = q->head->next;
-    if (q->head == NULL)
-        q->tail = NULL;
     return buf;
 }
 
@@ -138,6 +138,10 @@ static void forward(buf_t* buf) {
     }
 }
 
+// End of functions called with lock
+
+// Internal functions. IRQ and DMA management
+
 // Handle TX or RX dma done interrupt
 static void dma_irq0_handler(void) {
     // Handle receive first since we may be enqueuing a transmit
@@ -164,10 +168,12 @@ static void dma_irq0_handler(void) {
     }
 }
 
+// Initialization (called once)
+
 static void common_rx_dma_config(dma_channel_config* c) {
     channel_config_set_transfer_data_size(c, DMA_SIZE_32);
     channel_config_set_read_increment(c, false);
-    channel_config_set_dreq(c, pio_get_dreq(CMN_PIO, rx_sm, false));
+    channel_config_set_dreq(c, pio_get_dreq(PIO, rx_sm, false));
 }
 
 static void init_core1(void) {
@@ -181,34 +187,35 @@ static void init_core1(void) {
 
     // 32 bit PIO UART
     // TX pio
-    tx_sm = pio_claim_unused_sm(CMN_PIO, true);
-    pio_sm_set_pins_with_mask(CMN_PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
-    pio_sm_set_pindirs_with_mask(CMN_PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
-    pio_gpio_init(CMN_PIO, TX_GPIO);
-    uint offset = pio_add_program(CMN_PIO, &uart_tx_program);
+    gpio_pull_up(RX_GPIO);
+    busy_wait_us(1000);
+    tx_sm = pio_claim_unused_sm(PIO, true);
+    pio_sm_set_pins_with_mask(PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
+    pio_sm_set_pindirs_with_mask(PIO, tx_sm, 1u << TX_GPIO, 1u << TX_GPIO);
+    pio_gpio_init(PIO, TX_GPIO);
+    uint offset = pio_add_program(PIO, &uart_tx_program);
     pio_sm_config p = uart_tx_program_get_default_config(offset);
     sm_config_set_out_shift(&p, true, false, 32);
     sm_config_set_out_pins(&p, TX_GPIO, 1);
     sm_config_set_sideset_pins(&p, TX_GPIO);
-    sm_config_set_clkdiv(&p, PIO_CLK_DIV);
-    pio_sm_init(CMN_PIO, tx_sm, offset, &p);
-    pio_sm_set_enabled(CMN_PIO, tx_sm, true);
+    sm_config_set_clkdiv(&p, SM_CLK_DIV);
+    pio_sm_init(PIO, tx_sm, offset, &p);
+    pio_sm_set_enabled(PIO, tx_sm, true);
 
     // RX pio
-    busy_wait_us(1000);
-    rx_sm = pio_claim_unused_sm(CMN_PIO, true);
-    pio_sm_set_consecutive_pindirs(CMN_PIO, rx_sm, RX_GPIO, 1, false);
-    pio_gpio_init(CMN_PIO, RX_GPIO);
+    rx_sm = pio_claim_unused_sm(PIO, true);
+    pio_sm_set_consecutive_pindirs(PIO, rx_sm, RX_GPIO, 1, false);
+    pio_gpio_init(PIO, RX_GPIO);
     gpio_pull_up(RX_GPIO);
-    offset = pio_add_program(CMN_PIO, &uart_rx_program);
+    offset = pio_add_program(PIO, &uart_rx_program);
     p = uart_rx_program_get_default_config(offset);
     sm_config_set_in_pins(&p, RX_GPIO); // for WAIT, IN
     // Shift to right, autopush enabled
     sm_config_set_in_shift(&p, true, true, 32);
     // SM transmits 1 bit per 8 execution cycles.
-    sm_config_set_clkdiv(&p, PIO_CLK_DIV);
-    pio_sm_init(CMN_PIO, rx_sm, offset, &p);
-    pio_sm_set_enabled(CMN_PIO, rx_sm, true);
+    sm_config_set_clkdiv(&p, SM_CLK_DIV);
+    pio_sm_init(PIO, rx_sm, offset, &p);
+    pio_sm_set_enabled(PIO, rx_sm, true);
 
     // tx DMA
     free_q.head = free_q.tail = tx_q.head = tx_q.tail = rx_q.head = rx_q.tail = NULL;
@@ -218,10 +225,10 @@ static void init_core1(void) {
     dma_channel_config c = dma_channel_get_default_config(tx_ch);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32); // 32 bits per transfer
     channel_config_set_write_increment(&c, false);
-    channel_config_set_dreq(&c, pio_get_dreq(CMN_PIO, tx_sm, true)); // UART TX dreq driven DMA
+    channel_config_set_dreq(&c, pio_get_dreq(PIO, tx_sm, true));     // UART TX dreq driven DMA
     dma_channel_set_irq0_enabled(tx_ch, true);                       // interrupt when done
     // write to UART TX data register, no increment
-    dma_channel_configure(tx_ch, &c, &CMN_PIO->txf[tx_sm], NULL, 1, false);
+    dma_channel_configure(tx_ch, &c, &PIO->txf[tx_sm], NULL, 1, false);
 
     // rx DMA
     // control channel
@@ -232,12 +239,12 @@ static void init_core1(void) {
     common_rx_dma_config(&c);
     channel_config_set_write_increment(&c, false);
     dma_channel_configure(rx_ctl_ch, &c, &dma_hw->ch[rx_dat_ch].al1_transfer_count_trig,
-                          &CMN_PIO->rxf[rx_sm], 1, false);
+                          &PIO->rxf[rx_sm], 1, false);
     // data channel
     c = dma_channel_get_default_config(rx_dat_ch);
     common_rx_dma_config(&c);
     channel_config_set_write_increment(&c, true);
-    dma_channel_configure(rx_dat_ch, &c, 0, &CMN_PIO->rxf[rx_sm], 0, false);
+    dma_channel_configure(rx_dat_ch, &c, 0, &PIO->rxf[rx_sm], 0, false);
     dma_channel_set_irq0_enabled(rx_dat_ch, true);
 
     irq_set_exclusive_handler(DMA_IRQ_0, dma_irq0_handler);
@@ -248,12 +255,16 @@ static void init_core1(void) {
     start_rx();
     spin_unlock(lock, msk);
     multicore_fifo_push_blocking(0); // tell core 0 we're ready
+
+    // init complete, enter forever idle loop
     for (;;)                         // handle interrupts
         if (idle_handler)
             idle_handler();
         else
             __wfi();
 }
+
+// Public functions
 
 // Launch core 1 to initialize communication
 void comm_init(void (*idle)(void)) {
@@ -308,4 +319,4 @@ int comm_receive_blocking(int* from, void* buffer, int buf_length) {
 int comm_id(void) { return node_id; }
 
 // return effective communication baud rate (8 PIO clocks per bit)
-int comm_baud(void) { return clock_get_hz(clk_sys) / (PIO_CLK_DIV * BIT_CLKS); }
+int comm_baud(void) { return clock_get_hz(clk_sys) / (SM_CLK_DIV * BIT_CLKS); }
