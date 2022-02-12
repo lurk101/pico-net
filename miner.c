@@ -9,6 +9,9 @@
 #include "sha256.h"
 #include "stdinit.h"
 
+#include "hardware/irq.h"
+#include "hardware/pwm.h"
+
 #include "pico/stdlib.h"
 
 #include <stdio.h>
@@ -16,20 +19,20 @@
 
 enum { start_msg_id = 0, stop_msg_id, solution_msg_id };
 
-typedef struct {
-    uint32_t msg_id;
-    union {
-        struct {
-            char hdr[512 / 8];
-            uint32_t bits;
-            uint32_t nonce;
-        } start_msg;
-        struct {
-            uint32_t start;
-        } solution_msg;
-        struct {
-        } stop_msg;
-    } msgs;
+typedef union {
+    struct {
+        int8_t msg_id;
+        char hdr[512 / 8];
+        uint32_t bits;
+        uint32_t nonce;
+    } start_msg;
+    struct {
+        int8_t msg_id;
+        uint32_t start;
+    } solution_msg;
+    struct {
+        int8_t msg_id;
+    } stop_msg;
 } msg_t;
 
 static int master;
@@ -40,6 +43,8 @@ static uint32_t mine = 0;
 static char line[128];
 static uint32_t start_time;
 static char header[512 / 8];
+
+static uint8_t fade = 0;
 
 static char* skip_blanks(char* cp) {
     while (*cp && ((*cp == ' ') || (*cp == '\t')))
@@ -94,17 +99,17 @@ static void process_command(void) {
             printf("Target is: %08x\n", target);
         }
     } else if (strcmp(cp1, "go") == 0) {
-        m.msg_id = start_msg_id;
-        memcpy(m.msgs.start_msg.hdr, header, sizeof(header));
-        m.msgs.start_msg.bits = targ_to_bits(target);
+        m.start_msg.msg_id = start_msg_id;
+        memcpy(m.start_msg.hdr, header, sizeof(header));
+        m.start_msg.bits = targ_to_bits(target);
         uint32_t delta = (1ull << 32) / COMM_NODES;
         for (int n = 0; n < COMM_NODES; n++) {
-            m.msgs.start_msg.nonce = n * delta;
-            comm_transmit(n, &m, sizeof(m.msgs.start_msg) + 4);
+            m.start_msg.nonce = n * delta;
+            comm_transmit(n, &m, sizeof(m.start_msg));
         }
     } else if (strcmp(cp1, "stop") == 0) {
-        m.msg_id = stop_msg_id;
-        comm_transmit(COMM_NODES, &m, sizeof(m.msgs.stop_msg) + 4);
+        m.stop_msg.msg_id = stop_msg_id;
+        comm_transmit(COMM_NODES, &m, sizeof(m.stop_msg));
     } else
         printf("Unknown command '%s'\n", cp1);
 }
@@ -145,12 +150,12 @@ static void check_messages(void) {
     msg_t m;
     int from;
     comm_receive_blocking(&from, &m, sizeof(m));
-    switch (m.msg_id) {
+    switch (m.stop_msg.msg_id) {
     case start_msg_id:
         start_time = time_us_32();
-        memcpy(header, m.msgs.start_msg.hdr, sizeof(header));
-        target = bits_to_targ(m.msgs.start_msg.bits);
-        nonce_core0 = m.msgs.start_msg.nonce;
+        memcpy(header, m.start_msg.hdr, sizeof(header));
+        target = bits_to_targ(m.start_msg.bits);
+        nonce_core0 = m.start_msg.nonce;
         nonce_core1 = nonce_core0 + 1;
         master = from;
         printf("Header: %s\nTarget: %08x\nStart:  %08x from node %d\nNode %d searching\n", header,
@@ -158,7 +163,7 @@ static void check_messages(void) {
         mine = 1;
         break;
     case solution_msg_id:
-        printf("Solution %08x from node %d at %.2f\n", m.msgs.solution_msg.start, from,
+        printf("Solution %08x from node %d at %.2f\n", m.solution_msg.start, from,
                (time_us_32() - start_time) / 1e6);
         break;
     case stop_msg_id:
@@ -180,11 +185,12 @@ void check_hash(uint32_t s) {
     sha256_digest(&s256, &dgst);
     if (__builtin_bswap32(dgst[0]) <= target) {
         msg_t m;
-        m.msg_id = solution_msg_id;
-        m.msgs.solution_msg.start = s;
+        m.solution_msg.msg_id = solution_msg_id;
+        m.solution_msg.start = s;
         if (comm_id() != master)
             printf("Found %08x\n", s);
-        comm_transmit(master, &m, sizeof(m.msgs.solution_msg) + 4);
+        fade = 255;
+        comm_transmit(master, &m, sizeof(m.solution_msg));
     }
 }
 
@@ -195,11 +201,47 @@ void core1_idle(void) {
     }
 }
 
+#define LED_GPIO PICO_DEFAULT_LED_PIN
+//#define LED_GPIO 22 // custom LED
+
+void on_pwm_wrap() {
+    static bool going_up = true;
+    // Clear the interrupt flag that brought us here
+    pwm_clear_irq(pwm_gpio_to_slice_num(LED_GPIO));
+    if (fade)
+        fade--;
+    // Square the fade value to make the LED's brightness appear more linear
+    // Note this range matches with the wrap value
+    pwm_set_gpio_level(LED_GPIO, fade * fade);
+}
+
 // application entry point
 int main(void) {
     stdio_init();
     comm_init(core1_idle);
-    printf("Starting Bitcoin miner node %d\nLink speed: %u baud\n", comm_id(), comm_baud());
+    // Tell the LED pin that the PWM is in charge of its value.
+    gpio_set_function(LED_GPIO, GPIO_FUNC_PWM);
+    // Figure out which slice we just connected to the LED pin
+    uint slice_num = pwm_gpio_to_slice_num(LED_GPIO);
+    // Mask our slice's IRQ output into the PWM block's single interrupt line,
+    // and register our interrupt handler
+    pwm_clear_irq(slice_num);
+    pwm_set_irq_enabled(slice_num, true);
+    irq_set_exclusive_handler(PWM_IRQ_WRAP, on_pwm_wrap);
+    irq_set_enabled(PWM_IRQ_WRAP, true);
+
+    // Get some sensible defaults for the slice configuration. By default, the
+    // counter is allowed to wrap over its maximum range (0 to 2**16-1)
+    pwm_config config = pwm_get_default_config();
+    // Set divider, reduces counter clock to sysclock/this value
+    pwm_config_set_clkdiv(&config, 4);
+    // Load the configuration into our PWM slice, and set it running.
+    pwm_init(slice_num, &config, true);
+
+    // Everything after this point happens in the PWM interrupt handler, so we
+    // can twiddle our thumbs
+
+    printf("Started Bitcoin miner node %d\nLink speed: %u baud\n", comm_id(), comm_baud());
     for (;;) {
         check_console();
         check_messages();

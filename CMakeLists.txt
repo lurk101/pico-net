@@ -24,6 +24,7 @@ add_executable(miner miner.c)
 
 target_link_libraries(miner PUBLIC
     pico_stdlib
+	hardware_pwm
     comm
     stdinit
     sha256
