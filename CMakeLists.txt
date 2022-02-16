@@ -18,16 +18,16 @@ pico_sdk_init()
 
 add_subdirectory(comm-lib)
 add_subdirectory(stdinit-lib)
-add_subdirectory(sha256)
+add_subdirectory(sha256-lib)
 
 add_executable(miner miner.c)
 
 target_link_libraries(miner PUBLIC
     pico_stdlib
 	hardware_pwm
-    comm
-    stdinit
-    sha256
+    comm-lib
+    stdinit-lib
+    sha256-lib
 )
 
 pico_enable_stdio_uart(miner 1)
