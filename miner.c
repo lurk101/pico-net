@@ -17,6 +17,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#define LED_GPIO PICO_DEFAULT_LED_PIN
+//#define LED_GPIO 22 // custom LED
+
 enum { start_msg_id = 0, stop_msg_id, solution_msg_id };
 
 typedef union {
@@ -200,9 +203,6 @@ void core1_idle(void) {
         nonce_core1 += 2;
     }
 }
-
-#define LED_GPIO PICO_DEFAULT_LED_PIN
-//#define LED_GPIO 22 // custom LED
 
 void on_pwm_wrap() {
     static bool going_up = true;
