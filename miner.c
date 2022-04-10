@@ -32,6 +32,7 @@ typedef union {
     struct {
         int8_t msg_id;
         uint32_t start;
+        float t;
     } solution_msg;
     struct {
         int8_t msg_id;
@@ -167,7 +168,7 @@ static void check_messages(void) {
         break;
     case solution_msg_id:
         printf("Solution %08x from node %d at %.2f\n", m.solution_msg.start, from,
-               (time_us_32() - start_time) / 1e6);
+               m.solution_msg.t);
         break;
     case stop_msg_id:
         mine = 0;
@@ -190,6 +191,7 @@ void check_hash(uint32_t s) {
         msg_t m;
         m.solution_msg.msg_id = solution_msg_id;
         m.solution_msg.start = s;
+        m.solution_msg.t = (time_us_32() - start_time) / 1e6;
         if (comm_id() != master)
             printf("Found %08x\n", s);
         fade = 255;
@@ -212,7 +214,7 @@ void on_pwm_wrap() {
         fade--;
     // Square the fade value to make the LED's brightness appear more linear
     // Note this range matches with the wrap value
-    pwm_set_gpio_level(LED_GPIO, fade * fade);
+    pwm_set_gpio_level(LED_GPIO, (uint16_t)fade * fade);
 }
 
 // application entry point
