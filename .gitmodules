@@ -1,9 +1,6 @@
 [submodule "comm-lib"]
 	path = comm-lib
 	url = https://github.com/lurk101/comm-lib.git
-[submodule "stdinit-lib"]
-	path = stdinit-lib
-	url = https://github.com/lurk101/stdinit-lib.git
 [submodule "sha256-lib"]
 	path = sha256-lib
 	url = https://github.com/lurk101/sha256-lib.git

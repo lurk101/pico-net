@@ -17,7 +17,6 @@ project(miner C CXX ASM)
 pico_sdk_init()
 
 add_subdirectory(comm-lib)
-add_subdirectory(stdinit-lib)
 add_subdirectory(sha256-lib)
 
 add_executable(miner miner.c)
@@ -27,7 +26,6 @@ target_link_libraries(miner PUBLIC
     pico_stdlib
     hardware_pwm
     comm-lib
-    stdinit-lib
     sha256-lib
 )
 

@@ -7,7 +7,6 @@
  */
 #include "comm.h"
 #include "sha256.h"
-#include "stdinit.h"
 
 #include "hardware/irq.h"
 #include "hardware/pwm.h"
@@ -219,7 +218,7 @@ void on_pwm_wrap() {
 
 // application entry point
 int main(void) {
-    stdio_init();
+    stdio_init_all();
     comm_init(core1_idle);
     // Tell the LED pin that the PWM is in charge of its value.
     gpio_set_function(LED_GPIO, GPIO_FUNC_PWM);
