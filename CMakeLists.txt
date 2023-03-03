@@ -22,9 +22,10 @@ add_subdirectory(sha256-lib)
 
 add_executable(miner miner.c)
 
+target_include_directories(miner PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(miner PUBLIC
     pico_stdlib
-	hardware_pwm
+    hardware_pwm
     comm-lib
     stdinit-lib
     sha256-lib
