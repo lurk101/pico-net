@@ -219,7 +219,7 @@ void on_pwm_wrap() {
 // application entry point
 int main(void) {
     stdio_init_all();
-    comm_init(core1_idle);
+    comm_init(core1_idle, NULL);
     // Tell the LED pin that the PWM is in charge of its value.
     gpio_set_function(LED_GPIO, GPIO_FUNC_PWM);
     // Figure out which slice we just connected to the LED pin
