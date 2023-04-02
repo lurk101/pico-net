@@ -5,19 +5,17 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-#include "comm.h"
-#include "sha256.h"
-
-#include "hardware/irq.h"
-#include "hardware/pwm.h"
-
-#include "pico/stdlib.h"
-
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "comm.h"
+#include "hardware/irq.h"
+#include "hardware/pwm.h"
+#include "pico/stdlib.h"
+#include "sha256.h"
+
 #define LED_GPIO PICO_DEFAULT_LED_PIN
-//#define LED_GPIO 22 // custom LED
 
 enum { start_msg_id = 0, stop_msg_id, solution_msg_id };
 
@@ -98,7 +96,7 @@ static void process_command(void) {
         if (*cp3 == 0)
             printf("Need to specify a target value\n");
         else {
-            sscanf(cp3, "%u", &target);
+            target = strtoul(cp3, NULL, 0);
             printf("Target is: %08x\n", target);
         }
     } else if (strcmp(cp1, "go") == 0) {
